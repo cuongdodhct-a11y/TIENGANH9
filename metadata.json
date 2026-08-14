@@ -1,0 +1,10 @@
+{
+  "name": "Tiếng Anh 9 - SGK Tự Học",
+  "description": "Ứng dụng tự học Tiếng Anh lớp 9 bám sát chương trình SGK Bộ Giáo Dục, phát triển 4 kỹ năng với AI chấm phát âm, sửa bài viết, lộ trình cá nhân hóa và trò chơi rèn luyện.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
