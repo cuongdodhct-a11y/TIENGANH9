@@ -1,110 +1,205 @@
-// Speech Synthesis & Web Audio Helpers
-// Audio engine for TIENGANH9
+// ============================================================
+// TIENGANH9 - AUDIO ENGINE
+// ============================================================
+// Architecture:
 //
-// TTS strategy:
-// - Single English word  -> Vercel /api/tts -> Youdao
-// - Sentence / paragraph -> Browser SpeechSynthesis
-// - If server TTS fails for a single word -> Browser SpeechSynthesis fallback
+// English text
+//      ↓
+// /api/tts
+//      ↓
+// MP3 / ArrayBuffer
+//      ↓
+// AudioContext.decodeAudioData()
+//      ↓
+// AudioBufferSourceNode
+//      ↓
+// Speaker
+//
+// Browser SpeechSynthesis is ONLY used as a fallback.
+//
+// Important:
+// - Cốc Cốc does NOT use Browser SpeechSynthesis as the primary TTS.
+// - Safari does NOT use HTMLAudioElement as the primary playback engine.
+// - Both browsers use the same server TTS audio pipeline.
+// - Audio chunks are played sequentially.
+// - Only stopSpeaking() calls speechSynthesis.cancel().
+// ============================================================
 
-let activeAudioElement: HTMLAudioElement | null = null;
+let audioContext: AudioContext | null = null;
+let activeSource: AudioBufferSourceNode | null = null;
+
 let activeUtterance: SpeechSynthesisUtterance | null = null;
 
 let isAudioActive = false;
 let speechFallbackActive = false;
 
+let playbackGeneration = 0;
+
+// ============================================================
+// PUBLIC STATE
+// ============================================================
+
 export const isSpeakingActive = () => isAudioActive;
 
-/**
- * Stop every currently playing speech/audio.
- */
+// ============================================================
+// AUDIO CONTEXT
+// ============================================================
+
+const getAudioContext = (): AudioContext | null => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    if (!audioContext) {
+      const AudioContextClass =
+        window.AudioContext ||
+        (window as typeof window & {
+          webkitAudioContext?: typeof AudioContext;
+        }).webkitAudioContext;
+
+      if (!AudioContextClass) {
+        return null;
+      }
+
+      audioContext = new AudioContextClass();
+    }
+
+    return audioContext;
+  } catch (error) {
+    console.warn("AudioContext initialization failed:", error);
+    return null;
+  }
+};
+
+// ============================================================
+// RESUME AUDIO CONTEXT
+// ============================================================
+
+const resumeAudioContext = async (): Promise<boolean> => {
+  const ctx = getAudioContext();
+
+  if (!ctx) {
+    return false;
+  }
+
+  try {
+    if (ctx.state === "suspended") {
+      await ctx.resume();
+    }
+
+    return ctx.state === "running";
+  } catch (error) {
+    console.warn("AudioContext resume failed:", error);
+    return false;
+  }
+};
+
+// ============================================================
+// STOP CURRENT AUDIO SOURCE
+// ============================================================
+
+const stopActiveSource = () => {
+  if (!activeSource) {
+    return;
+  }
+
+  try {
+    activeSource.onended = null;
+    activeSource.stop();
+  } catch {
+    // Source may already have stopped.
+  }
+
+  try {
+    activeSource.disconnect();
+  } catch {
+    // Ignore.
+  }
+
+  activeSource = null;
+};
+
+// ============================================================
+// STOP ALL SPEECH
+// ============================================================
+
 export const stopSpeaking = () => {
+  // Invalidate every currently running playback chain.
+  playbackGeneration += 1;
+
   isAudioActive = false;
   speechFallbackActive = false;
 
-  if (typeof window === "undefined") return;
+  // Stop Web Audio.
+  stopActiveSource();
 
-  // Stop browser SpeechSynthesis
-  if ("speechSynthesis" in window) {
+  // Stop browser SpeechSynthesis fallback.
+  if (
+    typeof window !== "undefined" &&
+    "speechSynthesis" in window
+  ) {
     try {
       window.speechSynthesis.cancel();
     } catch {
-      // Ignore browser-specific errors
+      // Ignore browser-specific errors.
     }
   }
 
   activeUtterance = null;
-
-  // Stop server audio
-  if (activeAudioElement) {
-    try {
-      activeAudioElement.pause();
-      activeAudioElement.currentTime = 0;
-      activeAudioElement.removeAttribute("src");
-      activeAudioElement.load();
-    } catch {
-      // Ignore
-    }
-
-    activeAudioElement = null;
-  }
 };
 
-/**
- * Clean text before speech.
- */
-const cleanSpeechText = (text: string): string => {
+// ============================================================
+// TEXT CLEANING
+// ============================================================
+
+const cleanText = (text: string): string => {
   return text
-    .replace(/[*_~`#]/g, "")
-    .replace(/\[(.*?)\]\(.*?\)/g, "$1")
+    .replace(/[\*_~`#]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 };
 
-/**
- * Determine whether the text is a single English word.
- *
- * Examples:
- *   beautiful      -> true
- *   environment    -> true
- *   student's      -> true
- *   well-known     -> true
- *
- *   Hello world.   -> false
- *   This is good.  -> false
- */
-const isSingleEnglishWord = (text: string): boolean => {
-  const cleanText = cleanSpeechText(text);
+// ============================================================
+// TEXT CHUNKING
+// ============================================================
+//
+// Keep chunks reasonably short.
+// This prevents very long MP3 requests and keeps playback stable.
+//
 
-  return /^[A-Za-z]+(?:[-'][A-Za-z]+)*$/.test(cleanText);
-};
-
-/**
- * Split long sentences into natural speech chunks.
- *
- * We avoid sending sentences to Youdao.
- * These chunks are only used by Browser SpeechSynthesis.
- */
 const splitTextIntoChunks = (
   text: string,
-  maxLength = 220
+  maxLength = 180
 ): string[] => {
-  const cleanText = cleanSpeechText(text);
+  const clean = cleanText(text);
 
-  if (!cleanText) return [];
-
-  if (cleanText.length <= maxLength) {
-    return [cleanText];
+  if (!clean) {
+    return [];
   }
 
-  const sentences = cleanText.split(/(?<=[.!?])\s+/);
+  if (clean.length <= maxLength) {
+    return [clean];
+  }
+
+  const sentences = clean.split(
+    /(?<=[.!?])\s+/
+  );
 
   const chunks: string[] = [];
+
   let current = "";
 
   for (const sentence of sentences) {
+    const trimmedSentence = sentence.trim();
+
+    if (!trimmedSentence) {
+      continue;
+    }
+
     const candidate = current
-      ? `${current} ${sentence}`
-      : sentence;
+      ? `${current} ${trimmedSentence}`
+      : trimmedSentence;
 
     if (candidate.length <= maxLength) {
       current = candidate;
@@ -112,111 +207,291 @@ const splitTextIntoChunks = (
     }
 
     if (current) {
-      chunks.push(current.trim());
+      chunks.push(current);
       current = "";
     }
 
-    if (sentence.length <= maxLength) {
-      current = sentence;
+    if (trimmedSentence.length <= maxLength) {
+      current = trimmedSentence;
       continue;
     }
 
-    // Sentence is too long.
-    // Split at commas / semicolons / colons.
-    const parts = sentence.split(/(?<=[,;:])\s+/);
+    // Long sentence:
+    // split at commas first.
+    const commaParts = trimmedSentence.split(/,\s+/);
 
-    for (const part of parts) {
-      const cleanPart = part.trim();
+    for (const part of commaParts) {
+      const trimmedPart = part.trim();
 
-      if (!cleanPart) continue;
+      if (!trimmedPart) {
+        continue;
+      }
 
-      if (
-        current &&
-        `${current} ${cleanPart}`.length <= maxLength
+      if (trimmedPart.length <= maxLength) {
+        const candidatePart = current
+          ? `${current} ${trimmedPart}`
+          : trimmedPart;
+
+        if (candidatePart.length <= maxLength) {
+          current = candidatePart;
+        } else {
+          if (current) {
+            chunks.push(current);
+          }
+
+          current = trimmedPart;
+        }
+
+        continue;
+      }
+
+      // Hard split if still too long.
+      if (current) {
+        chunks.push(current);
+        current = "";
+      }
+
+      for (
+        let i = 0;
+        i < trimmedPart.length;
+        i += maxLength
       ) {
-        current = `${current} ${cleanPart}`;
-      } else if (cleanPart.length <= maxLength) {
-        if (current) {
-          chunks.push(current.trim());
-        }
+        const piece = trimmedPart
+          .slice(i, i + maxLength)
+          .trim();
 
-        current = cleanPart;
-      } else {
-        // Last-resort split for very long text.
-        if (current) {
-          chunks.push(current.trim());
-          current = "";
-        }
-
-        for (let i = 0; i < cleanPart.length; i += maxLength) {
-          chunks.push(
-            cleanPart.slice(i, i + maxLength).trim()
-          );
+        if (piece) {
+          chunks.push(piece);
         }
       }
     }
   }
 
   if (current) {
-    chunks.push(current.trim());
+    chunks.push(current);
   }
 
   return chunks.filter(Boolean);
 };
 
-/**
- * Find the best English voice available in the browser.
- */
-const getEnglishVoice = (): SpeechSynthesisVoice | null => {
-  if (
-    typeof window === "undefined" ||
-    !("speechSynthesis" in window)
-  ) {
-    return null;
-  }
+// ============================================================
+// SERVER TTS URL
+// ============================================================
 
-  const voices = window.speechSynthesis.getVoices();
-
-  if (!voices.length) {
-    return null;
-  }
-
-  // Prefer US English.
-  const usVoice = voices.find((voice) =>
-    /^en-US$/i.test(voice.lang)
-  );
-
-  if (usVoice) return usVoice;
-
-  // Then UK English.
-  const gbVoice = voices.find((voice) =>
-    /^en-GB$/i.test(voice.lang)
-  );
-
-  if (gbVoice) return gbVoice;
-
-  // Then any English voice.
-  const englishVoice = voices.find((voice) =>
-    /^en-/i.test(voice.lang)
-  );
-
-  return englishVoice || null;
+const buildTTSUrl = (text: string): string => {
+  return `/api/tts?text=${encodeURIComponent(text)}`;
 };
 
-/**
- * Browser SpeechSynthesis engine.
- */
-const speakWithBrowser = (
+// ============================================================
+// FETCH SERVER TTS AUDIO
+// ============================================================
+
+const fetchTTSAudio = async (
+  text: string
+): Promise<AudioBuffer | null> => {
+  const ctx = getAudioContext();
+
+  if (!ctx) {
+    return null;
+  }
+
+  try {
+    const response = await fetch(
+      buildTTSUrl(text),
+      {
+        method: "GET",
+        cache: "no-store",
+        headers: {
+          Accept: "audio/mpeg,audio/*,*/*",
+        },
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(
+        `TTS request failed: ${response.status}`
+      );
+    }
+
+    const arrayBuffer =
+      await response.arrayBuffer();
+
+    if (!arrayBuffer.byteLength) {
+      throw new Error("TTS returned empty audio.");
+    }
+
+    // Decode MP3 into raw PCM/audio buffer.
+    const audioBuffer =
+      await ctx.decodeAudioData(arrayBuffer);
+
+    return audioBuffer;
+  } catch (error) {
+    console.warn(
+      "Server TTS audio decoding failed:",
+      error
+    );
+
+    return null;
+  }
+};
+
+// ============================================================
+// PLAY ONE AUDIO BUFFER
+// ============================================================
+
+const playAudioBuffer = (
+  buffer: AudioBuffer,
+  generation: number
+): Promise<boolean> => {
+  return new Promise((resolve) => {
+    const ctx = getAudioContext();
+
+    if (!ctx) {
+      resolve(false);
+      return;
+    }
+
+    if (
+      generation !== playbackGeneration ||
+      !isAudioActive
+    ) {
+      resolve(false);
+      return;
+    }
+
+    try {
+      const source =
+        ctx.createBufferSource();
+
+      source.buffer = buffer;
+
+      // Small gain stage.
+      const gain = ctx.createGain();
+
+      gain.gain.value = 1;
+
+      source.connect(gain);
+      gain.connect(ctx.destination);
+
+      activeSource = source;
+
+      let resolved = false;
+
+      const finish = (success: boolean) => {
+        if (resolved) {
+          return;
+        }
+
+        resolved = true;
+
+        if (activeSource === source) {
+          activeSource = null;
+        }
+
+        try {
+          source.disconnect();
+        } catch {
+          // Ignore.
+        }
+
+        try {
+          gain.disconnect();
+        } catch {
+          // Ignore.
+        }
+
+        resolve(success);
+      };
+
+      source.onended = () => {
+        finish(
+          generation === playbackGeneration &&
+            isAudioActive
+        );
+      };
+
+      source.start(0);
+    } catch (error) {
+      console.warn(
+        "AudioBuffer playback failed:",
+        error
+      );
+
+      resolve(false);
+    }
+  });
+};
+
+// ============================================================
+// ENGLISH BROWSER VOICE
+// ============================================================
+
+const getEnglishVoice =
+  (): SpeechSynthesisVoice | null => {
+    if (
+      typeof window === "undefined" ||
+      !("speechSynthesis" in window)
+    ) {
+      return null;
+    }
+
+    const voices =
+      window.speechSynthesis.getVoices();
+
+    if (!voices.length) {
+      return null;
+    }
+
+    // Prefer US English.
+    const usVoice = voices.find(
+      (voice) =>
+        /^en-US$/i.test(voice.lang)
+    );
+
+    if (usVoice) {
+      return usVoice;
+    }
+
+    // Then UK English.
+    const ukVoice = voices.find(
+      (voice) =>
+        /^en-GB$/i.test(voice.lang)
+    );
+
+    if (ukVoice) {
+      return ukVoice;
+    }
+
+    // Then any English voice.
+    const englishVoice = voices.find(
+      (voice) =>
+        /^en(-|_)/i.test(voice.lang)
+    );
+
+    return englishVoice || null;
+  };
+
+// ============================================================
+// BROWSER SPEECH SYNTHESIS FALLBACK
+// ============================================================
+//
+// This function is NOT the primary engine.
+// It is used only when /api/tts cannot be loaded.
+//
+
+const speakWithBrowserFallback = (
   chunks: string[],
   rate: number,
-  onEnd?: () => void
-) => {
+  onEnd?: () => void,
+  generation?: number
+): void => {
   if (
     typeof window === "undefined" ||
     !("speechSynthesis" in window) ||
     chunks.length === 0
   ) {
     isAudioActive = false;
+    speechFallbackActive = false;
 
     if (onEnd) {
       onEnd();
@@ -225,11 +500,21 @@ const speakWithBrowser = (
     return;
   }
 
+  const currentGeneration =
+    generation ?? playbackGeneration;
+
   speechFallbackActive = true;
 
   let index = 0;
+  let finished = false;
 
   const finish = () => {
+    if (finished) {
+      return;
+    }
+
+    finished = true;
+
     speechFallbackActive = false;
     isAudioActive = false;
     activeUtterance = null;
@@ -241,62 +526,106 @@ const speakWithBrowser = (
 
   const speakNext = () => {
     if (
+      finished ||
+      currentGeneration !== playbackGeneration ||
       !isAudioActive ||
-      !speechFallbackActive ||
-      index >= chunks.length
+      !speechFallbackActive
     ) {
       finish();
       return;
     }
 
-    const text = chunks[index++];
+    if (index >= chunks.length) {
+      finish();
+      return;
+    }
+
+    const text = chunks[index++].trim();
+
+    if (!text) {
+      window.setTimeout(
+        speakNext,
+        120
+      );
+
+      return;
+    }
 
     const utterance =
       new SpeechSynthesisUtterance(text);
 
     activeUtterance = utterance;
 
-    // English pronunciation
+    // IMPORTANT:
+    // Force English.
     utterance.lang = "en-US";
 
-    // Keep the rate within a natural range.
+    // Natural English speaking speed.
     utterance.rate = Math.min(
-      1.15,
-      Math.max(0.65, rate)
+      1.05,
+      Math.max(0.72, rate)
     );
 
-    // Natural neutral pitch.
     utterance.pitch = 1;
-
-    // Full volume.
     utterance.volume = 1;
 
     const voice = getEnglishVoice();
 
     if (voice) {
       utterance.voice = voice;
+      utterance.lang = voice.lang;
     }
 
+    utterance.onstart = () => {
+      if (
+        currentGeneration !== playbackGeneration ||
+        activeUtterance !== utterance
+      ) {
+        return;
+      }
+
+      try {
+        window.speechSynthesis.resume();
+      } catch {
+        // Ignore.
+      }
+    };
+
     utterance.onend = () => {
-      if (activeUtterance !== utterance) {
+      if (
+        currentGeneration !== playbackGeneration ||
+        activeUtterance !== utterance
+      ) {
         return;
       }
 
       activeUtterance = null;
 
-      if (
-        isAudioActive &&
-        speechFallbackActive
-      ) {
-        // Small pause between chunks.
-        window.setTimeout(speakNext, 80);
-      }
-    };
-
-    utterance.onerror = () => {
-      if (activeUtterance !== utterance) {
+      if (index >= chunks.length) {
+        finish();
         return;
       }
+
+      // Delay prevents Chromium/Cốc Cốc
+      // SpeechSynthesis queue instability.
+      window.setTimeout(
+        speakNext,
+        160
+      );
+    };
+
+    utterance.onerror = (event) => {
+      if (
+        currentGeneration !== playbackGeneration ||
+        activeUtterance !== utterance
+      ) {
+        return;
+      }
+
+      console.warn(
+        "Browser SpeechSynthesis error:",
+        event.error
+      );
 
       activeUtterance = null;
 
@@ -304,28 +633,43 @@ const speakWithBrowser = (
     };
 
     try {
+      window.speechSynthesis.resume();
+
       window.speechSynthesis.speak(
         utterance
       );
-    } catch {
+    } catch (error) {
+      console.warn(
+        "SpeechSynthesis fallback failed:",
+        error
+      );
+
+      activeUtterance = null;
+
       finish();
     }
   };
 
-  /**
-   * Some browsers load voices asynchronously.
-   */
   const voices =
     window.speechSynthesis.getVoices();
 
   if (voices.length === 0) {
+    let handled = false;
+
     const handleVoicesChanged = () => {
+      if (handled) {
+        return;
+      }
+
+      handled = true;
+
       window.speechSynthesis.removeEventListener(
         "voiceschanged",
         handleVoicesChanged
       );
 
       if (
+        currentGeneration === playbackGeneration &&
         isAudioActive &&
         speechFallbackActive
       ) {
@@ -339,105 +683,140 @@ const speakWithBrowser = (
     );
 
     window.setTimeout(() => {
+      if (handled) {
+        return;
+      }
+
+      handled = true;
+
       window.speechSynthesis.removeEventListener(
         "voiceschanged",
         handleVoicesChanged
       );
 
       if (
+        currentGeneration === playbackGeneration &&
         isAudioActive &&
-        speechFallbackActive &&
-        !activeUtterance
+        speechFallbackActive
       ) {
         speakNext();
       }
-    }, 700);
+    }, 800);
   } else {
-    speakNext();
+    window.setTimeout(
+      speakNext,
+      30
+    );
   }
 };
 
-/**
- * Play audio returned by /api/tts.
- */
-const playServerAudio = (
-  url: string,
-  onSuccessEnd: () => void,
-  onFailure: () => void
-) => {
-  try {
-    const audio = new Audio();
+// ============================================================
+// PLAY SERVER TTS SEQUENTIALLY
+// ============================================================
 
-    activeAudioElement = audio;
+const speakWithServerTTS = async (
+  chunks: string[],
+  rate: number,
+  onEnd: (() => void) | undefined,
+  generation: number
+): Promise<boolean> => {
+  const ctx = getAudioContext();
 
-    audio.preload = "auto";
+  if (!ctx) {
+    return false;
+  }
 
-    let finished = false;
+  // Make sure AudioContext is active.
+  const contextReady =
+    await resumeAudioContext();
 
-    const fail = () => {
-      if (finished) {
-        return;
-      }
+  if (!contextReady) {
+    return false;
+  }
 
-      finished = true;
+  // Small safety delay.
+  // This helps Chromium-based browsers after
+  // a user click/tap starts the audio pipeline.
+  await new Promise<void>((resolve) => {
+    window.setTimeout(
+      resolve,
+      20
+    );
+  });
 
-      if (activeAudioElement === audio) {
-        activeAudioElement = null;
-      }
-
-      try {
-        audio.pause();
-        audio.removeAttribute("src");
-        audio.load();
-      } catch {
-        // Ignore
-      }
-
-      onFailure();
-    };
-
-    audio.onended = () => {
-      if (finished) {
-        return;
-      }
-
-      finished = true;
-
-      if (activeAudioElement === audio) {
-        activeAudioElement = null;
-      }
-
-      onSuccessEnd();
-    };
-
-    audio.onerror = fail;
-
-    audio.src = url;
-
-    const playPromise = audio.play();
-
-    if (playPromise !== undefined) {
-      playPromise.catch(fail);
+  for (
+    let index = 0;
+    index < chunks.length;
+    index++
+  ) {
+    if (
+      generation !== playbackGeneration ||
+      !isAudioActive
+    ) {
+      return true;
     }
-  } catch {
-    onFailure();
+
+    const text = chunks[index];
+
+    if (!text) {
+      continue;
+    }
+
+    const buffer =
+      await fetchTTSAudio(text);
+
+    if (!buffer) {
+      return false;
+    }
+
+    if (
+      generation !== playbackGeneration ||
+      !isAudioActive
+    ) {
+      return true;
+    }
+
+    const success =
+      await playAudioBuffer(
+        buffer,
+        generation
+      );
+
+    if (!success) {
+      return false;
+    }
+
+    // Very small gap between chunks.
+    // This avoids clicks / overlapping buffers.
+    if (index < chunks.length - 1) {
+      await new Promise<void>((resolve) => {
+        window.setTimeout(
+          resolve,
+          25
+        );
+      });
+    }
   }
+
+  if (
+    generation === playbackGeneration &&
+    isAudioActive
+  ) {
+    isAudioActive = false;
+    speechFallbackActive = false;
+
+    if (onEnd) {
+      onEnd();
+    }
+  }
+
+  return true;
 };
 
-/**
- * Main English speech function.
- *
- * IMPORTANT:
- *
- * Single word:
- *     /api/tts -> Youdao
- *
- * Sentence / paragraph:
- *     Browser SpeechSynthesis
- *
- * This prevents Youdao from receiving full sentences,
- * which was causing the 500 error observed in testing.
- */
+// ============================================================
+// MAIN ENGLISH TTS
+// ============================================================
+
 export const speakEnglish = (
   text: string,
   rate: number = 0.9,
@@ -447,11 +826,30 @@ export const speakEnglish = (
     return;
   }
 
+  const clean = cleanText(text);
+
+  if (!clean) {
+    if (onEnd) {
+      onEnd();
+    }
+
+    return;
+  }
+
+  // Stop previous speech.
   stopSpeaking();
 
-  const cleanText = cleanSpeechText(text);
+  // New playback generation.
+  const generation =
+    playbackGeneration;
 
-  if (!cleanText) {
+  const chunks =
+    splitTextIntoChunks(
+      clean,
+      180
+    );
+
+  if (chunks.length === 0) {
     if (onEnd) {
       onEnd();
     }
@@ -460,78 +858,60 @@ export const speakEnglish = (
   }
 
   isAudioActive = true;
+  speechFallbackActive = false;
 
-  /**
-   * CASE 1:
-   * Single English word -> Youdao.
-   */
-  if (isSingleEnglishWord(cleanText)) {
-    const encoded =
-      encodeURIComponent(cleanText);
-
-    const serverProxyUrl =
-      `/api/tts?text=${encoded}`;
-
-    playServerAudio(
-      serverProxyUrl,
-
-      // Server TTS success
-      () => {
-        isAudioActive = false;
-
-        if (onEnd) {
-          onEnd();
-        }
-      },
-
-      // Server TTS failure
-      () => {
-        if (!isAudioActive) {
-          return;
-        }
-
-        // Fallback to browser speech.
-        speakWithBrowser(
-          [cleanText],
-          rate,
-          onEnd
-        );
-      }
-    );
-
-    return;
-  }
-
-  /**
-   * CASE 2:
-   * Sentence / paragraph -> Browser SpeechSynthesis.
-   */
-  const chunks =
-    splitTextIntoChunks(
-      cleanText,
-      220
-    );
-
-  if (chunks.length === 0) {
-    isAudioActive = false;
-
-    if (onEnd) {
-      onEnd();
-    }
-
-    return;
-  }
-
-  speakWithBrowser(
+  // Start the server TTS pipeline.
+  //
+  // IMPORTANT:
+  // We deliberately do NOT detect Cốc Cốc here.
+  // Cốc Cốc and Safari use the same decoded-audio path.
+  //
+  // This eliminates:
+  // Cốc Cốc → Vietnamese SpeechSynthesis
+  // Safari → MP3
+  //
+  // and replaces it with:
+  // Both browsers → /api/tts → AudioContext.
+  void speakWithServerTTS(
     chunks,
     rate,
-    onEnd
-  );
+    onEnd,
+    generation
+  ).then((success) => {
+    if (success) {
+      return;
+    }
+
+    // Server TTS failed.
+    //
+    // Use browser SpeechSynthesis as
+    // a final fallback.
+    if (
+      generation !== playbackGeneration ||
+      !isAudioActive
+    ) {
+      return;
+    }
+
+    console.warn(
+      "Server TTS failed. Using browser SpeechSynthesis fallback."
+    );
+
+    speechFallbackActive = false;
+
+    speakWithBrowserFallback(
+      chunks,
+      rate,
+      onEnd,
+      generation
+    );
+  });
 };
 
-/**
- * Sound effects used by the application.
- */
+// ============================================================
+// SOUND EFFECTS
+// ============================================================
+
 export const playSoundEffect = (
   type:
     | "correct"
@@ -546,19 +926,71 @@ export const playSoundEffect = (
   }
 
   try {
-    const AudioContextClass =
-      window.AudioContext ||
-      (window as any).webkitAudioContext;
+    const ctx =
+      getAudioContext();
 
-    if (!AudioContextClass) {
+    if (!ctx) {
       return;
     }
 
-    const ctx =
-      new AudioContextClass();
+    void resumeAudioContext();
 
-    if (ctx.state === "suspended") {
-      ctx.resume();
+    const now =
+      ctx.currentTime;
+
+    if (type === "win") {
+      const notes = [
+        523.25,
+        659.25,
+        783.99,
+        1046.5,
+      ];
+
+      notes.forEach(
+        (frequency, index) => {
+          const osc =
+            ctx.createOscillator();
+
+          const gain =
+            ctx.createGain();
+
+          osc.type = "triangle";
+
+          osc.frequency.setValueAtTime(
+            frequency,
+            now + index * 0.1
+          );
+
+          gain.gain.setValueAtTime(
+            0.18,
+            now + index * 0.1
+          );
+
+          gain.gain.exponentialRampToValueAtTime(
+            0.001,
+            now +
+              index * 0.1 +
+              0.3
+          );
+
+          osc.connect(gain);
+          gain.connect(
+            ctx.destination
+          );
+
+          osc.start(
+            now + index * 0.1
+          );
+
+          osc.stop(
+            now +
+              index * 0.1 +
+              0.3
+          );
+        }
+      );
+
+      return;
     }
 
     const osc =
@@ -568,10 +1000,9 @@ export const playSoundEffect = (
       ctx.createGain();
 
     osc.connect(gain);
-    gain.connect(ctx.destination);
-
-    const now =
-      ctx.currentTime;
+    gain.connect(
+      ctx.destination
+    );
 
     if (type === "correct") {
       osc.type = "sine";
@@ -592,20 +1023,24 @@ export const playSoundEffect = (
       );
 
       gain.gain.setValueAtTime(
-        0.2,
+        0.18,
         now
       );
 
       gain.gain.exponentialRampToValueAtTime(
-        0.01,
+        0.001,
         now + 0.35
       );
 
       osc.start(now);
-      osc.stop(now + 0.35);
+      osc.stop(
+        now + 0.35
+      );
+
+      return;
     }
 
-    else if (type === "wrong") {
+    if (type === "wrong") {
       osc.type = "sawtooth";
 
       osc.frequency.setValueAtTime(
@@ -619,69 +1054,24 @@ export const playSoundEffect = (
       );
 
       gain.gain.setValueAtTime(
-        0.2,
+        0.15,
         now
       );
 
       gain.gain.exponentialRampToValueAtTime(
-        0.01,
+        0.001,
         now + 0.3
       );
 
       osc.start(now);
-      osc.stop(now + 0.3);
-    }
-
-    else if (type === "win") {
-      const notes = [
-        523.25,
-        659.25,
-        783.99,
-        1046.5,
-      ];
-
-      notes.forEach(
-        (freq, idx) => {
-          const noteOsc =
-            ctx.createOscillator();
-
-          const noteGain =
-            ctx.createGain();
-
-          noteOsc.connect(noteGain);
-          noteGain.connect(
-            ctx.destination
-          );
-
-          noteOsc.type = "triangle";
-
-          noteOsc.frequency.setValueAtTime(
-            freq,
-            now + idx * 0.1
-          );
-
-          noteGain.gain.setValueAtTime(
-            0.2,
-            now + idx * 0.1
-          );
-
-          noteGain.gain.exponentialRampToValueAtTime(
-            0.01,
-            now + idx * 0.1 + 0.3
-          );
-
-          noteOsc.start(
-            now + idx * 0.1
-          );
-
-          noteOsc.stop(
-            now + idx * 0.1 + 0.3
-          );
-        }
+      osc.stop(
+        now + 0.3
       );
+
+      return;
     }
 
-    else if (type === "click") {
+    if (type === "click") {
       osc.type = "triangle";
 
       osc.frequency.setValueAtTime(
@@ -700,10 +1090,14 @@ export const playSoundEffect = (
       );
 
       osc.start(now);
-      osc.stop(now + 0.06);
+      osc.stop(
+        now + 0.06
+      );
+
+      return;
     }
 
-    else if (type === "applause") {
+    if (type === "applause") {
       osc.type = "triangle";
 
       osc.frequency.setValueAtTime(
@@ -727,10 +1121,14 @@ export const playSoundEffect = (
       );
 
       osc.start(now);
-      osc.stop(now + 0.2);
+      osc.stop(
+        now + 0.2
+      );
+
+      return;
     }
 
-    else if (type === "chime") {
+    if (type === "chime") {
       osc.type = "sine";
 
       osc.frequency.setValueAtTime(
@@ -754,17 +1152,14 @@ export const playSoundEffect = (
       );
 
       osc.start(now);
-      osc.stop(now + 0.3);
+      osc.stop(
+        now + 0.3
+      );
     }
-
-    window.setTimeout(() => {
-      try {
-        ctx.close();
-      } catch {
-        // Ignore
-      }
-    }, 500);
-  } catch {
-    // Ignore audio context or permission errors.
+  } catch (error) {
+    console.warn(
+      "Sound effect failed:",
+      error
+    );
   }
 };
