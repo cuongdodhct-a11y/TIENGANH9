@@ -1,31 +1,54 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { GoogleGenAI } from '@google/genai';
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { GoogleGenAI } from "@google/genai";
 
-const getAI = () => {
+interface ChatMessage {
+  role?: "user" | "model";
+  sender?: "user" | "ai";
+  text?: string;
+  content?: string;
+}
+
+function getAI() {
   const apiKey = process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is missing.');
+    throw new Error("GEMINI_API_KEY is missing in Vercel environment variables.");
   }
 
   return new GoogleGenAI({
     apiKey,
     httpOptions: {
       headers: {
-        'User-Agent': 'aistudio-build',
+        "User-Agent": "aistudio-build",
       },
     },
   });
-};
+}
 
 export default async function handler(
   req: VercelRequest,
   res: VercelResponse
 ) {
-  // Chỉ chấp nhận POST
-  if (req.method !== 'POST') {
+  // ---------------------------------------------------------
+  // CORS
+  // ---------------------------------------------------------
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "POST, OPTIONS"
+  );
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type"
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.status(204).end();
+  }
+
+  if (req.method !== "POST") {
     return res.status(405).json({
-      error: 'Method Not Allowed',
+      error: "Method Not Allowed",
     });
   }
 
@@ -40,236 +63,257 @@ export default async function handler(
     const unit =
       currentUnit ||
       unitContext ||
-      'Tổng hợp Tiếng Anh Lớp 9';
+      "Toàn bộ chương trình Tiếng Anh lớp 9";
 
-    let question = userQuestion || '';
+    let question =
+      typeof userQuestion === "string"
+        ? userQuestion.trim()
+        : "";
 
-    // Nếu không có userQuestion thì lấy tin nhắn cuối cùng
+    // ---------------------------------------------------------
+    // Nếu frontend không gửi userQuestion,
+    // lấy tin nhắn cuối cùng của học sinh.
+    // ---------------------------------------------------------
     if (
       !question &&
       Array.isArray(messages) &&
       messages.length > 0
     ) {
-      const lastMsg = messages[messages.length - 1];
+      const lastMessage = messages[messages.length - 1];
 
-      question =
-        lastMsg?.text ||
-        lastMsg?.content ||
-        '';
+      if (
+        lastMessage?.role === "user" ||
+        lastMessage?.sender === "user"
+      ) {
+        question =
+          lastMessage.text ||
+          lastMessage.content ||
+          "";
+      }
     }
 
-    if (!question || !question.trim()) {
+    if (!question.trim()) {
       return res.status(400).json({
-        error: 'Thiếu nội dung câu hỏi.',
+        error: "Vui lòng nhập câu hỏi.",
       });
     }
 
+    // ---------------------------------------------------------
+    // SYSTEM PROMPT — CÔ GIÁO AI TIẾNG ANH
+    // ---------------------------------------------------------
     const systemInstruction = `
-Bạn là "Thầy Cô AI Tiếng Anh 9" - Gia sư thông minh
-bám sát chương trình SGK Tiếng Anh Lớp 9 của
-Bộ Giáo dục và Đào tạo Việt Nam.
+Bạn là "Thầy Cô AI Tiếng Anh 9" — một giáo viên tiếng Anh
+ảo có năng lực sư phạm cao, đồng hành trực tiếp với học sinh
+trong quá trình học tiếng Anh.
 
-Nhiệm vụ của bạn:
+MỤC TIÊU CAO NHẤT:
+Giúp học sinh hiểu bản chất, biết cách vận dụng và tiến bộ
+thực sự trong tiếng Anh; không chỉ đưa ra đáp án.
 
-1. Giải đáp thắc mắc về bài tập, từ vựng, ngữ pháp,
-   phát âm và các bài tập SGK Tiếng Anh lớp 9.
+PHẠM VI HỖ TRỢ:
+Bạn có thể trả lời mọi câu hỏi có liên quan đến việc học
+và sử dụng tiếng Anh, không giới hạn ở các chủ đề được
+lập trình trước.
 
-2. Trả lời bằng Tiếng Việt dễ hiểu, kết hợp Tiếng Anh
-   chuẩn khi cần thiết.
+Bao gồm nhưng không giới hạn:
+- Từ vựng
+- Ngữ pháp
+- Phát âm
+- Trọng âm
+- Nghe
+- Nói
+- Đọc
+- Viết
+- Dịch Anh-Việt và Việt-Anh
+- Giao tiếp tiếng Anh
+- Sửa câu
+- Sửa bài viết
+- Giải thích bài tập
+- Phân tích đáp án
+- Phrasal verbs
+- Collocations
+- Idioms
+- Word formation
+- Sentence transformation
+- Relative clauses
+- Tenses
+- Conditionals
+- Passive voice
+- Reported speech
+- Modal verbs
+- Comparisons
+- Mệnh đề và cấu trúc câu
+- Luyện thi vào lớp 10
+- Luyện kiểm tra trên lớp
+- Luyện giao tiếp
+- Luyện speaking
+- Luyện reading
+- Luyện writing
+- Kiểm tra trình độ
+- Thiết kế bài luyện tập cá nhân hóa
+- Và các vấn đề khác liên quan đến tiếng Anh.
 
-3. Dùng ví dụ minh họa sinh động, phù hợp với học sinh lớp 9.
+ĐỐI TƯỢNG:
+Học sinh Việt Nam, đặc biệt là học sinh lớp 9.
 
-4. Luôn lịch sự, ân cần và có tính sư phạm.
+BÁM SÁT CHƯƠNG TRÌNH:
+Khi câu hỏi liên quan đến SGK Tiếng Anh 9, ưu tiên giải thích
+phù hợp với trình độ học sinh lớp 9 và chương trình Việt Nam.
 
-5. Khi giải thích ngữ pháp:
-   - Nêu quy tắc.
-   - Giải thích cách dùng.
-   - Cho ví dụ.
-   - Chỉ ra lỗi thường gặp.
-   - Nếu phù hợp, đưa ra mẹo làm bài thi vào lớp 10.
+Tuy nhiên, không được từ chối các câu hỏi tiếng Anh ngoài
+SGK. Nếu học sinh hỏi kiến thức cao hơn lớp 9, hãy giải thích
+ở mức phù hợp với khả năng của học sinh.
 
-6. Khi học sinh hỏi bài tập:
-   - Phân tích yêu cầu.
-   - Hướng dẫn cách làm.
-   - Giải thích đáp án.
-   - Không chỉ đưa ra đáp án một cách máy móc.
+NGUYÊN TẮC SƯ PHẠM:
 
-Hiện tại học sinh đang học:
+1. Không chỉ đưa đáp án.
+   Hãy giải thích "vì sao".
+
+2. Nếu học sinh làm sai:
+   - Chỉ ra chỗ sai.
+   - Giải thích nguyên nhân.
+   - Đưa ra cách sửa.
+   - Cho ví dụ tương tự để học sinh tự luyện.
+
+3. Nếu câu hỏi đơn giản:
+   Trả lời ngắn gọn, dễ hiểu.
+
+4. Nếu vấn đề khó:
+   Chia thành từng bước nhỏ.
+
+5. Không làm học sinh cảm thấy bị phán xét.
+   Luôn kiên nhẫn, tích cực và khuyến khích.
+
+6. Khi cần, hãy hỏi ngược lại học sinh một câu để kiểm tra
+   xem học sinh đã thực sự hiểu chưa.
+
+7. Không tự giới hạn bản thân vào các câu trả lời mẫu.
+
+8. Không nói rằng bạn chỉ có thể trả lời một số chủ đề cố định.
+
+9. Không yêu cầu học sinh phải hỏi theo một mẫu nhất định.
+
+NGÔN NGỮ:
+- Với học sinh Việt Nam: giải thích chủ yếu bằng tiếng Việt,
+  kết hợp tiếng Anh khi cần.
+- Các ví dụ tiếng Anh phải tự nhiên và chính xác.
+- Khi học sinh muốn luyện giao tiếp bằng tiếng Anh, hãy chuyển
+  sang tiếng Anh phù hợp với trình độ của học sinh.
+
+CÁ NHÂN HÓA:
+Hãy sử dụng lịch sử cuộc trò chuyện để hiểu:
+- học sinh đang học gì;
+- học sinh đang gặp khó khăn ở đâu;
+- câu hỏi hiện tại có liên quan đến câu hỏi trước hay không.
+
+Nếu học sinh đang luyện một chủ đề, hãy duy trì mạch học đó.
+
+HIỆN TẠI:
+Học sinh đang học/ngữ cảnh liên quan đến:
 ${unit}
+
+PHONG CÁCH:
+- Giống một cô giáo tận tâm.
+- Thân thiện nhưng chuẩn mực.
+- Dễ hiểu.
+- Không dài dòng khi không cần thiết.
+- Có cấu trúc rõ ràng.
+- Dùng ví dụ thực tế.
+- Khuyến khích học sinh tự suy nghĩ.
+
+QUAN TRỌNG:
+Không được sử dụng câu trả lời dự phòng cố định chỉ vì câu hỏi
+không thuộc một vài chủ đề đã biết.
+
+Hãy xử lý câu hỏi hiện tại bằng năng lực ngôn ngữ và suy luận
+của mô hình.
 `;
 
-    let formattedMessages = '';
+    // ---------------------------------------------------------
+    // XÂY DỰNG LỊCH SỬ HỘI THOẠI
+    // ---------------------------------------------------------
+    const conversation = [];
 
-    if (
-      Array.isArray(messages) &&
-      messages.length > 0
-    ) {
-      formattedMessages = messages
-        .map((m: any) => {
-          const role =
-            m?.role === 'user' ||
-            m?.sender === 'user'
-              ? 'Học sinh'
-              : 'Thầy Cô AI';
+    if (Array.isArray(messages)) {
+      for (const message of messages) {
+        const text =
+          message?.text ||
+          message?.content ||
+          "";
 
-          const content =
-            m?.text ||
-            m?.content ||
-            '';
+        if (!text.trim()) continue;
 
-          return `${role}: ${content}`;
-        })
-        .join('\n\n');
-    } else {
-      formattedMessages = `Học sinh: ${question}`;
+        const role =
+          message?.role === "model" ||
+          message?.sender === "ai"
+            ? "model"
+            : "user";
+
+        conversation.push({
+          role,
+          parts: [
+            {
+              text: text.trim(),
+            },
+          ],
+        });
+      }
     }
 
+    // Đảm bảo câu hỏi hiện tại luôn là lượt USER cuối cùng.
+    const lastConversationMessage =
+      conversation[conversation.length - 1];
+
+    const lastText =
+      lastConversationMessage?.parts?.[0]?.text || "";
+
+    if (
+      !lastConversationMessage ||
+      lastConversationMessage.role !== "user" ||
+      lastText.trim() !== question.trim()
+    ) {
+      conversation.push({
+        role: "user",
+        parts: [
+          {
+            text: question.trim(),
+          },
+        ],
+      });
+    }
+
+    // ---------------------------------------------------------
+    // GỌI GEMINI
+    // ---------------------------------------------------------
     const ai = getAI();
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: `${formattedMessages}\n\nThầy Cô AI:`,
+      model: "gemini-3.6-flash",
+      contents: conversation,
       config: {
         systemInstruction,
-        temperature: 0.6,
+        maxOutputTokens: 4096,
       },
     });
 
     const reply =
-      response.text ||
-      'Cô chưa có câu trả lời phù hợp. Em thử hỏi lại cụ thể hơn nhé!';
+      response.text?.trim() ||
+      "Cô chưa nhận được nội dung trả lời từ hệ thống. Em thử lại nhé.";
 
     return res.status(200).json({
       reply,
     });
 
   } catch (error: any) {
-    console.error(
-      'Tutor chat Vercel Function error:',
-      error
-    );
+    console.error("Tutor Chat API Error:", error);
 
-    // Fallback thông minh nếu Gemini gặp lỗi
-    try {
-      const {
-        userQuestion,
-      } = req.body || {};
-
-      const question =
-        userQuestion ||
-        'câu hỏi của em';
-
-      const qLower =
-        String(question).toLowerCase();
-
-      let fallbackReply = '';
-
-      if (
-        qLower.includes('phrasal verb') ||
-        qLower.includes('cụm động từ')
-      ) {
-        fallbackReply = `📚 **Cụm động từ (Phrasal Verbs)**
-
-Phrasal Verb thường gồm:
-**Động từ + giới từ/trạng từ** và có thể tạo thành một nghĩa mới.
-
-Một số cụm quan trọng:
-
-1. **pass down** → truyền lại
-2. **set up** → thành lập
-3. **look forward to + V-ing** → mong đợi
-4. **cut down on** → cắt giảm
-5. **get on with** → hòa thuận, ăn ý
-
-💡 Lưu ý:
-**look forward to + V-ing**
-
-Ví dụ:
-**I look forward to meeting you.**
-
-Không dùng:
-❌ I look forward to meet you.`;
-
-      } else if (
-        qLower.includes('quan hệ') ||
-        qLower.includes('relative clause')
-      ) {
-        fallbackReply = `📚 **Mệnh đề quan hệ (Relative Clauses)**
-
-- **who**: dùng cho người.
-- **which**: dùng cho vật.
-- **that**: dùng cho người hoặc vật trong mệnh đề quan hệ xác định.
-- **where**: dùng cho nơi chốn.
-
-Ví dụ:
-
-**The girl who sits next to me is Mai.**
-
-**The book which I bought yesterday is interesting.**
-
-⚠️ Lưu ý:
-Không dùng **that** trong mệnh đề quan hệ không xác định sau dấu phẩy.`;
-
-      } else if (
-        qLower.includes('ed') ||
-        qLower.includes('phát âm')
-      ) {
-        fallbackReply = `🎯 **Quy tắc phát âm đuôi -ED**
-
-Có 3 cách phát âm chính:
-
-1. **/ɪd/**
-   Sau âm **/t/** hoặc **/d/**:
-   - wanted
-   - needed
-
-2. **/t/**
-   Sau các âm vô thanh như:
-   **/p/, /k/, /f/, /s/, /ʃ/, /tʃ/**
-   - stopped
-   - looked
-   - washed
-   - watched
-
-3. **/d/**
-   Các trường hợp còn lại:
-   - played
-   - cleaned
-
-💡 Khi làm bài thi, hãy xét **âm cuối của từ**, không chỉ nhìn chữ cái cuối.`;
-
-      } else {
-        fallbackReply = `Chào em! Cô đã nhận được câu hỏi:
-
-"${question}"
-
-Em hãy thử hỏi cụ thể hơn về:
-- Từ vựng
-- Ngữ pháp
-- Phát âm
-- Cụm động từ
-- Mệnh đề quan hệ
-- Bài tập SGK
-- Kỹ năng làm bài thi vào lớp 10
-
-Cô sẽ hướng dẫn từng bước cho em nhé! 😊`;
-      }
-
-      return res.status(200).json({
-        reply: fallbackReply,
-        fallback: true,
-      });
-
-    } catch (fallbackError) {
-      console.error(
-        'Tutor fallback error:',
-        fallbackError
-      );
-
-      return res.status(500).json({
-        error:
-          'Thầy Cô AI chưa thể phản hồi lúc này.',
-      });
-    }
+    // Không còn fallback trả lời mẫu.
+    // Trả lỗi thật để chúng ta phát hiện nguyên nhân.
+    return res.status(502).json({
+      error: "Gemini Tutor API failed.",
+      message:
+        error?.message ||
+        "Không thể kết nối tới Gemini API.",
+    });
   }
 }
