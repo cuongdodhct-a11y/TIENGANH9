@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, Modality } from "@google/genai";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -31,6 +31,64 @@ async function startServer() {
   // Health check API
   app.get("/api/health", (_req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  // Ephemeral Token for Gemini Live API
+  app.get("/api/live-token", async (_req, res) => {
+    try {
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        return res.status(500).json({
+          error: "GEMINI_API_KEY is missing on the server.",
+        });
+      }
+
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          apiVersion: "v1alpha",
+          headers: {
+            "User-Agent": "aistudio-build",
+          },
+        },
+      });
+
+      const now = Date.now();
+      const expireTime = new Date(now + 30 * 60 * 1000).toISOString();
+      const newSessionExpireTime = new Date(now + 60 * 1000).toISOString();
+
+      const token = await ai.authTokens.create({
+        config: {
+          uses: 1,
+          expireTime,
+          newSessionExpireTime,
+          liveConnectConstraints: {
+            model: "models/gemini-3.1-flash-live-preview",
+            config: {
+              responseModalities: [Modality.AUDIO],
+              sessionResumption: {
+                transparent: true,
+              },
+            },
+          },
+        },
+      });
+
+      if (!token?.name) {
+        return res.status(500).json({
+          error: "Failed to generate Live API token.",
+        });
+      }
+
+      return res.status(200).json({
+        token: token.name,
+      });
+    } catch (error: any) {
+      console.error("Live Token Error:", error?.message || "Unknown error");
+      return res.status(500).json({
+        error: error?.message || "Failed to create Live API token.",
+      });
+    }
   });
 
   // 1. AI WRITING EVALUATION API (Chấm bài viết Tiếng Anh lớp 9)
