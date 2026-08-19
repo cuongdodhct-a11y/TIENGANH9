@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { SCRAMBLE_SENTENCES } from '../../data/scrambleSentences';
 import { Sparkles, CheckCircle2, RotateCw, Trophy, ArrowRight, HelpCircle, Volume2 } from 'lucide-react';
-import { playSoundEffect, speakEnglish } from '../../utils/audioHelpers';
+import { playSoundEffect, speakEnglish, getPreferredVoice, VoiceProfile } from '../../utils/audioHelpers';
+import { VoiceSelector } from '../common/VoiceSelector';
 
 export const SentenceScrambleGame: React.FC<{ onAddPoints: (pts: number) => void }> = ({ onAddPoints }) => {
   const [currentIdx, setCurrentIdx] = useState(0);
@@ -66,10 +67,14 @@ export const SentenceScrambleGame: React.FC<{ onAddPoints: (pts: number) => void
     }
   };
 
+  const handleSpeakSample = (forcedVoice?: VoiceProfile) => {
+    speakEnglish(currentItem.correctSentence, 0.85, undefined, forcedVoice || getPreferredVoice());
+  };
+
   return (
     <div className="max-w-3xl mx-auto space-y-6 pb-12">
       {/* Header Banner */}
-      <div className="bg-gradient-to-r from-emerald-700 via-teal-700 to-cyan-800 rounded-3xl p-6 sm:p-8 text-white shadow-xl flex items-center justify-between">
+      <div className="bg-gradient-to-r from-emerald-700 via-teal-700 to-cyan-800 rounded-3xl p-6 sm:p-8 text-white shadow-xl flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <span className="inline-flex items-center space-x-1 bg-white/20 px-3 py-1 rounded-full text-xs font-bold uppercase">
             <Sparkles className="w-4 h-4 text-amber-300" />
@@ -78,7 +83,8 @@ export const SentenceScrambleGame: React.FC<{ onAddPoints: (pts: number) => void
           <h2 className="text-2xl sm:text-3xl font-black mt-2">Ghép Câu Hoàn Chỉnh SGK 9</h2>
           <p className="text-xs text-teal-100">Luyện cấu trúc ngữ pháp và trật tự từ trong tiếng Anh</p>
         </div>
-        <div className="flex flex-wrap items-center gap-2 max-w-full justify-end">
+
+        <div className="flex flex-wrap items-center gap-2 max-w-full justify-start md:justify-end">
           <button
             onClick={() => {
               if (currentIdx > 0) {
@@ -145,19 +151,27 @@ export const SentenceScrambleGame: React.FC<{ onAddPoints: (pts: number) => void
       {/* Main Scramble Playfield */}
       <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-6">
         {/* Vietnamese Meaning Prompt */}
-        <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-4">
+        <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="space-y-1 text-left">
             <span className="text-xs font-bold text-slate-400 uppercase">Dịch sang Tiếng Anh câu sau:</span>
             <p className="text-lg font-bold text-slate-900">"{currentItem.vietnameseMeaning}"</p>
           </div>
-          <button
-            onClick={() => speakEnglish(currentItem.correctSentence)}
-            className="p-3 rounded-2xl bg-teal-50 text-teal-700 hover:bg-teal-100 transition-colors shrink-0 flex items-center space-x-1 font-bold text-xs"
-            title="Nghe câu mẫu Tiếng Anh"
-          >
-            <Volume2 className="w-5 h-5 text-teal-600" />
-            <span className="hidden sm:inline">Nghe mẫu</span>
-          </button>
+          <div className="flex items-center space-x-2 shrink-0">
+            <button
+              onClick={() => handleSpeakSample('female')}
+              className="px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 transition-colors font-bold text-xs flex items-center space-x-1"
+              title="Cô Emily đọc câu mẫu"
+            >
+              <span>👩‍🏫 Cô Emily</span>
+            </button>
+            <button
+              onClick={() => handleSpeakSample('male')}
+              className="px-3 py-2 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 transition-colors font-bold text-xs flex items-center space-x-1"
+              title="Thầy David đọc câu mẫu"
+            >
+              <span>👨‍🏫 Thầy David</span>
+            </button>
+          </div>
         </div>
 
         {/* Assembled Words Box (Drop Target) */}
@@ -207,19 +221,37 @@ export const SentenceScrambleGame: React.FC<{ onAddPoints: (pts: number) => void
                 : 'bg-rose-50 text-rose-900 border-rose-300'
             }`}
           >
-            <p className="font-extrabold flex items-center space-x-1">
-              {isCorrect ? (
-                <>
-                  <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                  <span>Chính Xác! Câu Hoàn Chỉnh:</span>
-                </>
-              ) : (
-                <>
-                  <HelpCircle className="w-5 h-5 text-rose-600" />
-                  <span>Rất Tiếc! Đáp Án Đúng Là:</span>
-                </>
-              )}
-            </p>
+            <div className="flex items-center justify-between">
+              <p className="font-extrabold flex items-center space-x-1">
+                {isCorrect ? (
+                  <>
+                    <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                    <span>Chính Xác! Câu Hoàn Chỉnh:</span>
+                  </>
+                ) : (
+                  <>
+                    <HelpCircle className="w-5 h-5 text-rose-600" />
+                    <span>Rất Tiếc! Đáp Án Đúng Là:</span>
+                  </>
+                )}
+              </p>
+              <div className="flex items-center space-x-1">
+                <button
+                  onClick={() => handleSpeakSample('female')}
+                  className="px-2 py-1 rounded bg-rose-100 text-rose-800 text-xs font-bold"
+                  title="Cô Emily đọc đáp án"
+                >
+                  👩‍🏫
+                </button>
+                <button
+                  onClick={() => handleSpeakSample('male')}
+                  className="px-2 py-1 rounded bg-blue-100 text-blue-800 text-xs font-bold"
+                  title="Thầy David đọc đáp án"
+                >
+                  👨‍🏫
+                </button>
+              </div>
+            </div>
             <p className="text-base font-bold text-slate-900 font-sans">"{currentItem.correctSentence}"</p>
             <p className="text-xs text-slate-600 italic pt-1">💡 Mẹo ngữ pháp: {currentItem.grammarTip}</p>
           </div>
@@ -236,7 +268,7 @@ export const SentenceScrambleGame: React.FC<{ onAddPoints: (pts: number) => void
             className="flex items-center space-x-1.5 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl"
           >
             <RotateCw className="w-4 h-4" />
-            <span>Xếp LạiTừ Đầu</span>
+            <span>Xếp Lại Từ Đầu</span>
           </button>
 
           {!isChecked ? (

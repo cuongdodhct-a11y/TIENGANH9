@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { SPEED_REFLEX_QUESTIONS } from '../../data/speedReflexQuestions';
 import { Zap, Timer, Trophy, RefreshCw, Flame, CheckCircle2, Volume2 } from 'lucide-react';
-import { playSoundEffect, speakEnglish } from '../../utils/audioHelpers';
+import { playSoundEffect, speakEnglish, getPreferredVoice, VoiceProfile } from '../../utils/audioHelpers';
 
 export const SpeedReflexGame: React.FC<{ onAddPoints: (pts: number) => void }> = ({ onAddPoints }) => {
   const [gameStarted, setGameStarted] = useState(false);
@@ -119,13 +119,22 @@ export const SpeedReflexGame: React.FC<{ onAddPoints: (pts: number) => void }> =
           <div className="py-6 px-4 text-center bg-slate-50 rounded-2xl border border-slate-200 space-y-2 relative">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-slate-400 uppercase">Câu hỏi:</span>
-              <button
-                onClick={() => speakEnglish(currentQ.prompt)}
-                className="p-1.5 rounded-lg bg-amber-100 text-amber-800 hover:bg-amber-200 transition-colors"
-                title="Nghe câu hỏi"
-              >
-                <Volume2 className="w-4 h-4" />
-              </button>
+              <div className="flex items-center space-x-1">
+                <button
+                  onClick={() => speakEnglish(currentQ.prompt, 0.9, undefined, 'female')}
+                  className="px-2 py-1 rounded-lg bg-pink-100 text-pink-700 hover:bg-pink-200 text-xs font-bold transition-colors"
+                  title="Cô Emily đọc câu hỏi"
+                >
+                  👩‍🏫 Cô Emily
+                </button>
+                <button
+                  onClick={() => speakEnglish(currentQ.prompt, 0.9, undefined, 'male')}
+                  className="px-2 py-1 rounded-lg bg-blue-100 text-blue-700 hover:bg-blue-200 text-xs font-bold transition-colors"
+                  title="Thầy David đọc câu hỏi"
+                >
+                  👨‍🏫 Thầy David
+                </button>
+              </div>
             </div>
             <h3 className="text-xl sm:text-2xl font-black text-slate-900 leading-snug">
               "{currentQ.prompt}"

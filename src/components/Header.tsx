@@ -1,6 +1,7 @@
 import React from 'react';
 import { BookOpen, Gamepad2, Sparkles, Bot, Flame, Trophy, Route, SlidersHorizontal } from 'lucide-react';
 import { UserProgressState } from '../types';
+import { VoiceSelector } from './common/VoiceSelector';
 
 interface HeaderProps {
   currentTab: 'units' | 'games' | 'route' | 'ai-quiz';
@@ -97,8 +98,13 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           </nav>
 
-          {/* User Stats & AI Assistant Drawer Trigger */}
-          <div className="flex items-center space-x-3">
+          {/* User Stats & Global Voice Selector & AI Assistant Trigger */}
+          <div className="flex items-center space-x-2.5">
+            {/* Global Voice Quick Selector */}
+            <div className="hidden xl:block">
+              <VoiceSelector compact />
+            </div>
+
             {/* Streak Counter */}
             <div
               className="flex items-center space-x-1.5 bg-amber-500/10 border border-amber-500/30 px-3 py-1.5 rounded-lg text-amber-400 font-semibold text-xs sm:text-sm cursor-pointer hover:bg-amber-500/20 transition-colors"
@@ -128,6 +134,11 @@ export const Header: React.FC<HeaderProps> = ({
               <span className="lg:hidden">Hỏi AI</span>
             </button>
           </div>
+        </div>
+
+        {/* Mobile Sub-Header with Voice Selector */}
+        <div className="xl:hidden flex items-center justify-center py-1.5 border-t border-slate-800/80 bg-slate-950/40">
+          <VoiceSelector compact />
         </div>
 
         {/* Mobile Navigation Tabs */}

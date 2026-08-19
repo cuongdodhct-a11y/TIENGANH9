@@ -100,6 +100,7 @@ export interface UnitData {
   speakingPrompts: SpeakingPrompt[];
   reading: ReadingSection;
   writing: WritingPrompt;
+  writingPrompts?: WritingPrompt[];
 }
 
 export interface DiagnosticQuestion {

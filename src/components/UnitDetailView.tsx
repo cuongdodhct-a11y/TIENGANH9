@@ -147,6 +147,7 @@ export const UnitDetailView: React.FC<UnitDetailViewProps> = ({
         {activeTab === 'writing' && (
           <WritingTab
             writingPrompt={unit.writing}
+            writingPrompts={unit.writingPrompts}
             onSkillComplete={() => onSkillComplete('writing')}
           />
         )}

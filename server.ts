@@ -300,36 +300,147 @@ Hiện tại học sinh đang hỏi về: ${unit}.`;
     }
   });
 
-  // 6. TTS AUDIO PROXY API (Phát âm chuẩn Tiếng Anh không bị lỗi CORS)
+  // In-memory TTS Cache for ultra-fast response
+  const ttsCache = new Map<string, { buffer: Buffer; contentType: string }>();
+
+  // 6. TTS AUDIO PROXY API (Phát âm chuẩn Tiếng Anh - Cô Emily & Thầy David)
+  function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000, numChannels = 1, bitDepth = 16): Buffer {
+    const dataSize = pcmBuffer.length;
+    const header = Buffer.alloc(44);
+
+    // "RIFF" chunk descriptor
+    header.write("RIFF", 0);
+    header.writeUInt32LE(36 + dataSize, 4);
+    header.write("WAVE", 8);
+
+    // "fmt " sub-chunk
+    header.write("fmt ", 12);
+    header.writeUInt32LE(16, 16); // Subchunk1Size
+    header.writeUInt16LE(1, 20); // AudioFormat (PCM = 1)
+    header.writeUInt16LE(numChannels, 22); // NumChannels
+    header.writeUInt32LE(sampleRate, 24); // SampleRate
+    header.writeUInt32LE(sampleRate * numChannels * (bitDepth / 8), 28); // ByteRate
+    header.writeUInt16LE(numChannels * (bitDepth / 8), 32); // BlockAlign
+    header.writeUInt16LE(bitDepth, 34); // BitsPerSample
+
+    // "data" sub-chunk
+    header.write("data", 36);
+    header.writeUInt32LE(dataSize, 40);
+
+    return Buffer.concat([header, pcmBuffer]);
+  }
+
   app.get("/api/tts", async (req, res) => {
     try {
-      const text = (req.query.text as string) || "";
-      if (!text.trim()) {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+
+      const rawText = (req.query.text as string) || "";
+      const voiceParam = ((req.query.voice as string) || "female").toLowerCase();
+      const isMale = voiceParam === "male" || voiceParam === "david" || voiceParam === "man";
+      const normalizedVoiceKey = isMale ? "male" : "female";
+
+      if (!rawText.trim()) {
         return res.status(400).send("Text parameter is required");
       }
 
-      const encoded = encodeURIComponent(text.slice(0, 300));
+      // Backend text sanitization
+      let cleanText = rawText
+        .replace(/\/[^/\n]{2,}\//g, " ")
+        .replace(/\[\.\.\.\]|\[\s*\]|_{2,}|\.{3,}/g, " blank ")
+        .replace(/\[[^\]]*\]|\{[^}]*\}/g, " ")
+        .replace(/\(\s*(n|v|adj|adv|prep|conj|pron|art|phr v|n phr|v-ing|p\.p|v2|v3|s|pl|sing|c|u|plural|singular)\s*\)/gi, " ")
+        .replace(/[*_~`#>]|\*{2,}/g, " ")
+        .replace(/^[A-D]\.\s+/i, "")
+        .replace(/^\d+\.\s+/, "")
+        .replace(/\s+/g, " ")
+        .trim();
 
-      // Try Youdao dictvoice audio endpoint first
-      const youdaoUrl = `https://dict.youdao.com/dictvoice?type=0&audio=${encoded}`;
+      if (!cleanText) {
+        cleanText = rawText.slice(0, 100);
+      }
+
+      const cacheKey = `${normalizedVoiceKey}:${cleanText.toLowerCase()}`;
+      const cached = ttsCache.get(cacheKey);
+      if (cached) {
+        res.setHeader("Content-Type", cached.contentType);
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        return res.send(cached.buffer);
+      }
+
+      const sendAndCache = (buf: Buffer, type: string) => {
+        if (ttsCache.size > 2000) {
+          const firstKey = ttsCache.keys().next().value;
+          if (firstKey) ttsCache.delete(firstKey);
+        }
+        ttsCache.set(cacheKey, { buffer: buf, contentType: type });
+        res.setHeader("Content-Type", type);
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        return res.send(buf);
+      };
+
+      // 1. TIER 1: Native Gemini TTS Speech Synthesis (Genuine Male: Puck / Female: Aoede)
       try {
+        const ai = getAI();
+        const voiceName = isMale ? "Puck" : "Aoede";
+
+        const ttsPromise = ai.models.generateContent({
+          model: "gemini-3.1-flash-tts-preview",
+          contents: [{ parts: [{ text: cleanText.slice(0, 350) }] }],
+          config: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName },
+              },
+            },
+          },
+        });
+
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("TTS timeout")), 2500)
+        );
+
+        const ttsResponse: any = await Promise.race([ttsPromise, timeoutPromise]);
+        const base64Audio = ttsResponse?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (base64Audio) {
+          const pcmBuffer = Buffer.from(base64Audio, "base64");
+          const wavBuffer = pcmToWav(pcmBuffer, 24000, 1, 16);
+          return sendAndCache(wavBuffer, "audio/wav");
+        }
+      } catch (geminiTtsErr: any) {
+        // Fallback to high-speed stream
+      }
+
+      // 2. TIER 2: Fast Dictionary Audio Stream
+      const encoded = encodeURIComponent(cleanText.slice(0, 300));
+      const youdaoType = isMale ? "2" : "1"; // type 2 = US English, type 1 = UK English
+      const youdaoUrl = `https://dict.youdao.com/dictvoice?type=${youdaoType}&audio=${encoded}`;
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 2000);
+
         const youdaoRes = await fetch(youdaoUrl, {
+          signal: controller.signal,
           headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
           },
         });
+        clearTimeout(timeoutId);
+
         if (youdaoRes.ok) {
           const arrayBuffer = await youdaoRes.arrayBuffer();
-          res.setHeader("Content-Type", "audio/mpeg");
-          res.setHeader("Cache-Control", "public, max-age=86400");
-          return res.send(Buffer.from(arrayBuffer));
+          const buf = Buffer.from(arrayBuffer);
+          if (buf.length > 500) {
+            return sendAndCache(buf, "audio/mpeg");
+          }
         }
       } catch (e) {
-        // Continue to Google fallback
+        // Fallback to Google Translate
       }
 
-      // Fallback to Google Translate TTS endpoint
-      const googleUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=en&client=tw-ob&q=${encoded}`;
+      // 3. TIER 3: Google Translate TTS Fallback
+      const googleUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=en-US&client=tw-ob&q=${encoded}`;
       const googleRes = await fetch(googleUrl, {
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -342,9 +453,8 @@ Hiện tại học sinh đang hỏi về: ${unit}.`;
       }
 
       const arrayBuffer = await googleRes.arrayBuffer();
-      res.setHeader("Content-Type", "audio/mpeg");
-      res.setHeader("Cache-Control", "public, max-age=86400");
-      res.send(Buffer.from(arrayBuffer));
+      const buf = Buffer.from(arrayBuffer);
+      return sendAndCache(buf, "audio/mpeg");
     } catch (err: any) {
       console.error("TTS proxy error:", err);
       res.status(500).send("TTS proxy error");

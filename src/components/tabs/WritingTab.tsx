@@ -1,14 +1,23 @@
 import React, { useState } from 'react';
 import { WritingPrompt, AIWritingCorrection } from '../../types';
-import { PenTool, Sparkles, RefreshCw, Trophy, AlertCircle, CheckCircle2, ChevronDown, ChevronUp, Bot, BookOpen } from 'lucide-react';
-import { playSoundEffect } from '../../utils/audioHelpers';
+import { PenTool, Sparkles, RefreshCw, Trophy, AlertCircle, ChevronDown, ChevronUp, Bot, BookOpen, Volume2 } from 'lucide-react';
+import { playSoundEffect, speakEnglish, stopSpeaking, VoiceProfile } from '../../utils/audioHelpers';
 
 interface WritingTabProps {
   writingPrompt: WritingPrompt;
+  writingPrompts?: WritingPrompt[];
   onSkillComplete: () => void;
 }
 
-export const WritingTab: React.FC<WritingTabProps> = ({ writingPrompt, onSkillComplete }) => {
+export const WritingTab: React.FC<WritingTabProps> = ({
+  writingPrompt,
+  writingPrompts,
+  onSkillComplete,
+}) => {
+  const promptsList = writingPrompts && writingPrompts.length > 0 ? writingPrompts : [writingPrompt];
+  const [selectedPromptIndex, setSelectedPromptIndex] = useState(0);
+  const currentPrompt = promptsList[selectedPromptIndex] || writingPrompt;
+
   const [studentText, setStudentText] = useState('');
   const [showOutline, setShowOutline] = useState(true);
   const [showSample, setShowSample] = useState(false);
@@ -17,6 +26,14 @@ export const WritingTab: React.FC<WritingTabProps> = ({ writingPrompt, onSkillCo
   const [errorMessage, setErrorMessage] = useState('');
 
   const wordCount = studentText.trim() === '' ? 0 : studentText.trim().split(/\s+/).length;
+
+  const handleSelectPrompt = (index: number) => {
+    setSelectedPromptIndex(index);
+    setStudentText('');
+    setCorrectionResult(null);
+    setErrorMessage('');
+    setShowSample(false);
+  };
 
   const handleGradeWriting = async () => {
     if (wordCount < 10) {
@@ -32,9 +49,9 @@ export const WritingTab: React.FC<WritingTabProps> = ({ writingPrompt, onSkillCo
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          promptTopic: writingPrompt.title,
+          promptTopic: currentPrompt.title,
           studentText,
-          wordLimit: writingPrompt.wordLimit,
+          wordLimit: currentPrompt.wordLimit,
         }),
       });
 
@@ -56,11 +73,41 @@ export const WritingTab: React.FC<WritingTabProps> = ({ writingPrompt, onSkillCo
   };
 
   const handleUseSampleText = () => {
-    setStudentText(writingPrompt.sampleGrade10Response);
+    setStudentText(currentPrompt.sampleGrade10Response);
   };
 
   return (
     <div className="space-y-8">
+      {/* Multiple Prompts Selector */}
+      {promptsList.length > 1 && (
+        <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-extrabold uppercase tracking-wider text-purple-700">
+              Chọn đề bài luyện viết ({promptsList.length} đề bài bám sát cấu trúc đề thi):
+            </span>
+            <span className="text-xs text-slate-500 font-medium">
+              Đang chọn: <strong>Đề {selectedPromptIndex + 1}/{promptsList.length}</strong>
+            </span>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+            {promptsList.map((p, idx) => (
+              <button
+                key={p.id || idx}
+                onClick={() => handleSelectPrompt(idx)}
+                className={`px-3 py-2 rounded-xl text-xs font-bold transition-all text-left flex flex-col space-y-0.5 ${
+                  selectedPromptIndex === idx
+                    ? 'bg-purple-600 text-white shadow-md shadow-purple-200 ring-2 ring-purple-600 ring-offset-1'
+                    : 'bg-slate-50 text-slate-700 hover:bg-purple-50 hover:text-purple-700 border border-slate-200'
+                }`}
+              >
+                <span className="text-[10px] uppercase opacity-80">Đề {idx + 1}</span>
+                <span className="truncate font-semibold text-[11px]">{p.title.slice(0, 24)}...</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Prompt Card */}
       <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-6">
         <div className="flex items-start space-x-3 border-b border-slate-100 pb-4">
@@ -69,12 +116,12 @@ export const WritingTab: React.FC<WritingTabProps> = ({ writingPrompt, onSkillCo
           </div>
           <div className="space-y-1">
             <span className="text-xs font-bold uppercase text-purple-700 bg-purple-50 border border-purple-200 px-2.5 py-0.5 rounded-md">
-              Đề bài viết SGK 9 (Giới hạn: {writingPrompt.wordLimit})
+              Đề bài viết SGK 9 (Giới hạn: {currentPrompt.wordLimit})
             </span>
             <h3 className="text-lg sm:text-xl font-extrabold text-slate-900 leading-snug">
-              {writingPrompt.title}
+              {currentPrompt.title}
             </h3>
-            <p className="text-xs text-slate-500">{writingPrompt.description}</p>
+            <p className="text-xs text-slate-500">{currentPrompt.description}</p>
           </div>
         </div>
 
@@ -96,7 +143,7 @@ export const WritingTab: React.FC<WritingTabProps> = ({ writingPrompt, onSkillCo
               <div className="space-y-1">
                 <p className="font-bold text-purple-900">1. Dàn ý gợi ý:</p>
                 <ul className="list-disc list-inside text-slate-600 space-y-0.5 pl-2">
-                  {writingPrompt.suggestedOutline.map((item, idx) => (
+                  {currentPrompt.suggestedOutline.map((item, idx) => (
                     <li key={idx}>{item}</li>
                   ))}
                 </ul>
@@ -105,7 +152,7 @@ export const WritingTab: React.FC<WritingTabProps> = ({ writingPrompt, onSkillCo
               <div className="space-y-1 pt-2">
                 <p className="font-bold text-purple-900">2. Cụm từ hay nên dùng:</p>
                 <div className="flex flex-wrap gap-1.5 pt-1">
-                  {writingPrompt.usefulPhrases.map((phrase, idx) => (
+                  {currentPrompt.usefulPhrases.map((phrase, idx) => (
                     <span
                       key={idx}
                       className="bg-purple-50 text-purple-800 border border-purple-200 px-2.5 py-1 rounded-lg font-medium"
@@ -143,7 +190,7 @@ export const WritingTab: React.FC<WritingTabProps> = ({ writingPrompt, onSkillCo
             value={studentText}
             onChange={(e) => setStudentText(e.target.value)}
             rows={7}
-            placeholder="Viết đoạn văn Tiếng Anh của em ở đây (ví dụ: Van Phuc Silk Village is a famous craft village...)"
+            placeholder="Viết đoạn văn Tiếng Anh của em ở đây..."
             className="w-full p-4 rounded-2xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent font-sans leading-relaxed bg-slate-50/50"
           />
 
@@ -187,12 +234,30 @@ export const WritingTab: React.FC<WritingTabProps> = ({ writingPrompt, onSkillCo
         {/* Sample Essay Drawer */}
         {showSample && (
           <div className="p-5 rounded-2xl bg-purple-50/80 border border-purple-200 text-xs sm:text-sm space-y-2 text-purple-950">
-            <p className="font-extrabold text-purple-900 flex items-center space-x-1">
-              <Sparkles className="w-4 h-4 text-amber-500" />
-              <span>Bài Viết Mẫu Chuẩn Kỳ Thi Tuyển Sinh Vào 10:</span>
-            </p>
+            <div className="flex items-center justify-between">
+              <p className="font-extrabold text-purple-900 flex items-center space-x-1">
+                <Sparkles className="w-4 h-4 text-amber-500" />
+                <span>Bài Viết Mẫu Chuẩn Kỳ Thi Tuyển Sinh Vào 10:</span>
+              </p>
+              <div className="flex items-center space-x-1.5">
+                <button
+                  onClick={() => speakEnglish(currentPrompt.sampleGrade10Response, 0.88, undefined, 'female')}
+                  className="px-2.5 py-1 rounded-xl bg-pink-100 text-pink-700 hover:bg-pink-200 text-xs font-bold transition-colors flex items-center space-x-1"
+                  title="Cô Emily đọc bài mẫu"
+                >
+                  <span>👩‍🏫 Cô Emily</span>
+                </button>
+                <button
+                  onClick={() => speakEnglish(currentPrompt.sampleGrade10Response, 0.88, undefined, 'male')}
+                  className="px-2.5 py-1 rounded-xl bg-blue-100 text-blue-700 hover:bg-blue-200 text-xs font-bold transition-colors flex items-center space-x-1"
+                  title="Thầy David đọc bài mẫu"
+                >
+                  <span>👨‍🏫 Thầy David</span>
+                </button>
+              </div>
+            </div>
             <p className="leading-relaxed italic bg-white p-4 rounded-xl border border-purple-200">
-              "{writingPrompt.sampleGrade10Response}"
+              "{currentPrompt.sampleGrade10Response}"
             </p>
           </div>
         )}

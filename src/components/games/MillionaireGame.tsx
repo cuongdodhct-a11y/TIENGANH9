@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { MillionaireQuestion } from '../../types';
 import { MILLIONAIRE_QUESTIONS } from '../../data/millionaireQuestions';
 import { Trophy, Users, PhoneCall, HelpCircle, RefreshCw, Award, Volume2, Sparkles, CheckCircle2 } from 'lucide-react';
-import { playSoundEffect, speakEnglish } from '../../utils/audioHelpers';
+import { playSoundEffect, speakEnglish, getPreferredVoice, VoiceProfile } from '../../utils/audioHelpers';
 
 export const MillionaireGame: React.FC<{ onAddPoints: (pts: number) => void }> = ({ onAddPoints }) => {
   const [currentLevelIdx, setCurrentLevelIdx] = useState(0);
@@ -183,13 +183,22 @@ export const MillionaireGame: React.FC<{ onAddPoints: (pts: number) => void }> =
                 <span className="text-xs font-bold text-cyan-400 uppercase tracking-widest bg-blue-900/80 px-3.5 py-1 rounded-full border border-blue-700">
                   Câu Hỏi Số {currentQ.level}: {currentQ.prize}
                 </span>
-                <button
-                  onClick={() => speakEnglish(currentQ.question)}
-                  className="p-2 rounded-xl bg-indigo-900/80 text-amber-300 hover:bg-indigo-800 border border-indigo-700 transition-colors"
-                  title="Nghe MC đọc câu hỏi"
-                >
-                  <Volume2 className="w-5 h-5" />
-                </button>
+                <div className="flex items-center space-x-1.5">
+                  <button
+                    onClick={() => speakEnglish(currentQ.question, 0.9, undefined, 'female')}
+                    className="px-2.5 py-1 rounded-xl bg-pink-600/80 hover:bg-pink-500 text-white text-xs font-bold border border-pink-400/40 transition-colors flex items-center space-x-1"
+                    title="Cô Emily đọc câu hỏi"
+                  >
+                    <span>👩‍🏫 Cô Emily</span>
+                  </button>
+                  <button
+                    onClick={() => speakEnglish(currentQ.question, 0.9, undefined, 'male')}
+                    className="px-2.5 py-1 rounded-xl bg-blue-600/80 hover:bg-blue-500 text-white text-xs font-bold border border-blue-400/40 transition-colors flex items-center space-x-1"
+                    title="Thầy David đọc câu hỏi"
+                  >
+                    <span>👨‍🏫 Thầy David</span>
+                  </button>
+                </div>
               </div>
               <h3 className="text-xl sm:text-2xl font-extrabold text-amber-200 leading-relaxed">
                 "{currentQ.question}"

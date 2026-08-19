@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { SpeakingPrompt, AISpeakingEval } from '../../types';
-import { Mic, MicOff, Volume2, Sparkles, CheckCircle2, AlertCircle, RefreshCw, Trophy, Bot, ChevronRight } from 'lucide-react';
-import { speakEnglish, playSoundEffect, stopSpeaking } from '../../utils/audioHelpers';
+import { Mic, MicOff, Volume2, Sparkles, CheckCircle2, AlertCircle, RefreshCw, Trophy, Bot, VolumeX, Send, ArrowRight } from 'lucide-react';
+import { speakEnglish, playSoundEffect, stopSpeaking, getPreferredVoice, VoiceProfile } from '../../utils/audioHelpers';
+import { VoiceSelector } from '../common/VoiceSelector';
 
 interface SpeakingTabProps {
   speakingPrompts: SpeakingPrompt[];
@@ -12,118 +13,198 @@ export const SpeakingTab: React.FC<SpeakingTabProps> = ({ speakingPrompts, onSki
   const [activePromptIndex, setActivePromptIndex] = useState(0);
   const [isRecording, setIsRecording] = useState(false);
   const [isPlayingNative, setIsPlayingNative] = useState(false);
+  const [activePlayingVoice, setActivePlayingVoice] = useState<VoiceProfile | null>(null);
   const [userTranscript, setUserTranscript] = useState('');
+  const [interimTranscript, setInterimTranscript] = useState('');
   const [evalResult, setEvalResult] = useState<AISpeakingEval | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [audioLevel, setAudioLevel] = useState(0);
+
+  const recognitionRef = useRef<any>(null);
+  const animFrameRef = useRef<number | null>(null);
 
   const currentPrompt = speakingPrompts[activePromptIndex] || speakingPrompts[0];
 
-  const handlePlayNativeAudio = () => {
-    if (isPlayingNative) {
+  // Direct Teacher Audio Playback with 0ms Delay
+  const handlePlayNativeAudio = (forcedVoice?: VoiceProfile) => {
+    playSoundEffect('click');
+    const voiceToPlay = forcedVoice || getPreferredVoice();
+    if (isPlayingNative && activePlayingVoice === voiceToPlay) {
       stopSpeaking();
       setIsPlayingNative(false);
+      setActivePlayingVoice(null);
     } else {
       setIsPlayingNative(true);
-      speakEnglish(currentPrompt.targetSentence, 0.85, () => {
-        setIsPlayingNative(false);
-      });
+      setActivePlayingVoice(voiceToPlay);
+      speakEnglish(
+        currentPrompt.targetSentence,
+        0.88,
+        () => {
+          setIsPlayingNative(false);
+          setActivePlayingVoice(null);
+        },
+        voiceToPlay
+      );
     }
   };
 
-  // Speech recognition instance setup
-  const [recognition, setRecognition] = useState<any>(null);
+  // Setup Speech Recognition with Maximum Sensitivity
+  const initAndStartRecognition = () => {
+    if (typeof window === 'undefined') return;
 
-  useEffect(() => {
-    if (typeof window !== 'undefined' && ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)) {
-      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      try {
-        const rec = new SpeechRecognition();
-        rec.continuous = true;
-        rec.interimResults = true;
-        rec.lang = 'en-US';
+    const SpeechRecognition =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-        rec.onresult = (event: any) => {
-          let transcript = '';
-          for (let i = 0; i < event.results.length; i++) {
-            transcript += event.results[i][0].transcript + ' ';
-          }
-          if (transcript.trim()) {
-            setUserTranscript(transcript.trim());
-          }
-        };
-
-        rec.onerror = (e: any) => {
-          console.warn('Speech recognition error:', e);
-          if (e.error === 'no-speech' || e.error === 'aborted') {
-            // Ignore benign non-fatal noise or manual stop
-            return;
-          }
-          setIsRecording(false);
-          if (e.error === 'not-allowed') {
-            setErrorMessage('Microphone chưa được cấp quyền trên trình duyệt hoặc bị chặn bởi khung xem trước. Bạn có thể tự gõ/sửa câu bên dưới để AI chấm điểm!');
-          } else if (e.error === 'audio-capture') {
-            setErrorMessage('Không tìm thấy thiết bị micro. Vui lòng cắm micro và kiểm tra lại.');
-          } else {
-            setErrorMessage('Micro ngắt kết nối. Bạn có thể bấm nói lại hoặc tự nhập câu phát âm bên dưới.');
-          }
-        };
-
-        rec.onend = () => {
-          setIsRecording(false);
-        };
-
-        setRecognition(rec);
-      } catch (err) {
-        console.warn('Failed to construct SpeechRecognition:', err);
-      }
-    }
-  }, []);
-
-  const handleStartRecording = () => {
-    setErrorMessage('');
-    setEvalResult(null);
-
-    if (!recognition) {
-      setErrorMessage('Trình duyệt của bạn không hỗ trợ Web Speech Recognition hoặc micro bị giới hạn. Bạn có thể nhập câu bên dưới để AI chấm phát âm!');
+    if (!SpeechRecognition) {
+      setErrorMessage(
+        'Trình duyệt chưa hỗ trợ Web Speech API trực tiếp. Bạn có thể bấm "Điền câu mẫu" hoặc nhập câu bên dưới để AI chấm điểm!'
+      );
       setUserTranscript(currentPrompt.targetSentence);
       return;
     }
 
-    setUserTranscript('');
-    setIsRecording(true);
-    try {
-      recognition.start();
-    } catch (e) {
-      console.warn('Recognition start exception, retrying:', e);
+    // Stop existing instance if any
+    if (recognitionRef.current) {
       try {
-        recognition.stop();
-        setTimeout(() => {
-          recognition.start();
-        }, 200);
-      } catch (err) {
-        setIsRecording(false);
-        setErrorMessage('Không thể bật micro. Vui lòng kiểm tra quyền truy cập micro trên trình duyệt.');
+        recognitionRef.current.abort();
+      } catch (e) {
+        // ignore
       }
     }
-  };
 
-  const handleStopRecording = () => {
-    if (recognition && isRecording) {
-      recognition.stop();
+    try {
+      const rec = new SpeechRecognition();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = 'en-US';
+      rec.maxAlternatives = 3;
+
+      rec.onstart = () => {
+        setIsRecording(true);
+        setErrorMessage('');
+        playSoundEffect('chime');
+      };
+
+      rec.onresult = (event: any) => {
+        let finalStr = '';
+        let interimStr = '';
+
+        for (let i = 0; i < event.results.length; i++) {
+          const res = event.results[i];
+          if (res.isFinal) {
+            finalStr += res[0].transcript + ' ';
+          } else {
+            interimStr += res[0].transcript;
+          }
+        }
+
+        if (finalStr.trim()) {
+          setUserTranscript((prev) => {
+            const combined = (prev ? prev + ' ' : '') + finalStr.trim();
+            // deduplicate spaces
+            return combined.replace(/\s+/g, ' ');
+          });
+        }
+        setInterimTranscript(interimStr);
+      };
+
+      rec.onerror = (event: any) => {
+        console.warn('Speech Recognition Event:', event.error);
+        if (event.error === 'no-speech' || event.error === 'aborted') {
+          return;
+        }
+        setIsRecording(false);
+        if (event.error === 'not-allowed') {
+          setErrorMessage(
+            'Quyền truy cập Micro bị chặn trên trình duyệt. Vui lòng cho phép Microphone hoặc nhập câu bên dưới để AI chấm điểm.'
+          );
+        } else {
+          setErrorMessage('Đã dừng thu âm. Bạn có thể bấm Micro để nói lại hoặc sửa câu bên dưới.');
+        }
+      };
+
+      rec.onend = () => {
+        setIsRecording(false);
+        setInterimTranscript('');
+      };
+
+      recognitionRef.current = rec;
+      rec.start();
+    } catch (err: any) {
+      console.warn('Failed to start speech recognition:', err);
       setIsRecording(false);
+      setErrorMessage('Không thể khởi tạo micro. Bạn có thể nhập câu bên dưới để AI chấm phát âm!');
     }
   };
 
+  const handleToggleRecording = () => {
+    playSoundEffect('click');
+    setErrorMessage('');
+
+    if (isRecording) {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch (e) {
+          // ignore
+        }
+      }
+      setIsRecording(false);
+      setInterimTranscript('');
+    } else {
+      setUserTranscript('');
+      setInterimTranscript('');
+      setEvalResult(null);
+      initAndStartRecognition();
+    }
+  };
+
+  // Audio wave pulsing effect
+  useEffect(() => {
+    if (isRecording) {
+      const interval = setInterval(() => {
+        setAudioLevel(Math.random() * 80 + 20);
+      }, 100);
+      return () => clearInterval(interval);
+    } else {
+      setAudioLevel(0);
+    }
+  }, [isRecording]);
+
+  // Clean up on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch (e) {
+          // ignore
+        }
+      }
+      stopSpeaking();
+    };
+  }, []);
+
   const handleEvaluateSpeaking = async (transcriptToEvaluate?: string) => {
-    const textToEvaluate = transcriptToEvaluate || userTranscript;
+    const textToEvaluate = transcriptToEvaluate || (userTranscript + ' ' + interimTranscript).trim();
     if (!textToEvaluate.trim()) {
-      setErrorMessage('Vui lòng nói hoặc bật mic để nhận diện giọng nói trước khi chấm.');
+      setErrorMessage('Vui lòng nói vào micro hoặc nhập câu trước khi chấm điểm.');
       return;
+    }
+
+    if (isRecording && recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {
+        // ignore
+      }
+      setIsRecording(false);
     }
 
     setIsLoading(true);
     setErrorMessage('');
+    playSoundEffect('click');
 
     try {
       const res = await fetch('/api/ai/speaking-eval', {
@@ -154,15 +235,15 @@ export const SpeakingTab: React.FC<SpeakingTabProps> = ({ speakingPrompts, onSki
 
   return (
     <div className="space-y-8">
-      {/* Target Prompt Navigation Header */}
+      {/* Top Header & Sentence Navigation */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 bg-slate-900 text-white p-6 rounded-3xl border border-slate-800 shadow-xl">
         <div>
-          <span className="text-xs font-bold text-cyan-400 uppercase tracking-widest flex items-center space-x-1 mb-1">
-            <Bot className="w-4 h-4 text-cyan-400" />
-            <span>Trợ Lý AI Chấm Phát Âm Chuẩn SGK 9</span>
+          <span className="text-xs font-black text-cyan-400 uppercase tracking-widest flex items-center space-x-1.5 mb-1">
+            <Bot className="w-4 h-4 text-cyan-400 animate-pulse" />
+            <span>AI Chấm Phát Âm SGK Tiếng Anh 9</span>
           </span>
-          <h3 className="text-lg font-bold text-white">
-            Luyện Nói Mẫu Câu {activePromptIndex + 1}/{speakingPrompts.length}
+          <h3 className="text-xl font-black text-white">
+            Mẫu Câu Luyện Nói {activePromptIndex + 1}/{speakingPrompts.length}
           </h3>
         </div>
 
@@ -170,17 +251,19 @@ export const SpeakingTab: React.FC<SpeakingTabProps> = ({ speakingPrompts, onSki
           <button
             onClick={() => {
               if (activePromptIndex > 0) {
+                playSoundEffect('click');
                 setActivePromptIndex(activePromptIndex - 1);
                 setUserTranscript('');
+                setInterimTranscript('');
                 setEvalResult(null);
                 setErrorMessage('');
               }
             }}
             disabled={activePromptIndex === 0}
-            className="px-2.5 py-1.5 rounded-xl font-bold text-xs bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+            className="px-3 py-2 rounded-xl font-bold text-xs bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
             title="Câu trước"
           >
-            ◀ Trở lại
+            ◀ Câu trước
           </button>
 
           <div className="flex flex-wrap items-center gap-1 max-h-24 overflow-y-auto p-1 bg-slate-950/50 rounded-2xl border border-slate-800">
@@ -188,14 +271,16 @@ export const SpeakingTab: React.FC<SpeakingTabProps> = ({ speakingPrompts, onSki
               <button
                 key={idx}
                 onClick={() => {
+                  playSoundEffect('click');
                   setActivePromptIndex(idx);
                   setUserTranscript('');
+                  setInterimTranscript('');
                   setEvalResult(null);
                   setErrorMessage('');
                 }}
-                className={`w-7 h-7 rounded-lg font-bold text-xs transition-all flex items-center justify-center ${
+                className={`w-7 h-7 rounded-lg font-black text-xs transition-all flex items-center justify-center ${
                   activePromptIndex === idx
-                    ? 'bg-blue-600 text-white shadow-md scale-105'
+                    ? 'bg-blue-600 text-white shadow-md scale-105 ring-2 ring-blue-400'
                     : 'bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white'
                 }`}
               >
@@ -207,130 +292,211 @@ export const SpeakingTab: React.FC<SpeakingTabProps> = ({ speakingPrompts, onSki
           <button
             onClick={() => {
               if (activePromptIndex < speakingPrompts.length - 1) {
+                playSoundEffect('click');
                 setActivePromptIndex(activePromptIndex + 1);
                 setUserTranscript('');
+                setInterimTranscript('');
                 setEvalResult(null);
                 setErrorMessage('');
               }
             }}
             disabled={activePromptIndex === speakingPrompts.length - 1}
-            className="px-2.5 py-1.5 rounded-xl font-bold text-xs bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+            className="px-3 py-2 rounded-xl font-bold text-xs bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
             title="Câu kế tiếp"
           >
-            Kế tiếp ▶
+            Câu tiếp ▶
           </button>
         </div>
       </div>
 
-      {/* Target Sentence Display Card */}
+      {/* Prominent Dedicated Dual-Voice Selector Bar */}
+      <VoiceSelector showTestButton />
+
+      {/* Target Sentence Card */}
       <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-6">
-        <div className="p-6 rounded-2xl bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold uppercase text-blue-700 bg-blue-100 px-2.5 py-1 rounded-md">
+        <div className="p-6 rounded-2xl bg-gradient-to-r from-blue-50 via-indigo-50 to-cyan-50 border border-blue-200 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <span className="text-xs font-black uppercase text-blue-700 bg-blue-100 px-3.5 py-1.5 rounded-xl self-start">
               Mẫu câu cần luyện phát âm
             </span>
-            <button
-              onClick={handlePlayNativeAudio}
-              className={`flex items-center space-x-1.5 px-3 py-1.5 text-xs font-bold rounded-xl shadow-sm transition-all ${
-                isPlayingNative
-                  ? 'bg-amber-500 text-slate-900 animate-pulse'
-                  : 'bg-blue-600 hover:bg-blue-700 text-white'
-              }`}
-            >
-              <Volume2 className={`w-4 h-4 ${isPlayingNative ? 'animate-bounce' : ''}`} />
-              <span>{isPlayingNative ? 'Đang Phát Audio...' : 'Nghe Mẫu Bản Ngữ'}</span>
-            </button>
+
+            {/* Individual Teacher Pronunciation Buttons */}
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => handlePlayNativeAudio('female')}
+                className={`flex items-center space-x-2 px-4 py-2 text-xs font-black rounded-2xl shadow-sm transition-all ${
+                  isPlayingNative && activePlayingVoice === 'female'
+                    ? 'bg-rose-600 text-white animate-pulse ring-4 ring-rose-300 scale-105'
+                    : 'bg-white hover:bg-rose-50 text-rose-700 border-2 border-rose-300'
+                }`}
+                title="Nghe Cô Emily đọc mẫu câu này"
+              >
+                <span className="text-base">👩‍🏫</span>
+                <span>{isPlayingNative && activePlayingVoice === 'female' ? 'Cô Emily đang đọc...' : 'Cô Emily Đọc'}</span>
+                <Volume2 className={`w-4 h-4 ${isPlayingNative && activePlayingVoice === 'female' ? 'animate-bounce' : ''}`} />
+              </button>
+
+              <button
+                onClick={() => handlePlayNativeAudio('male')}
+                className={`flex items-center space-x-2 px-4 py-2 text-xs font-black rounded-2xl shadow-sm transition-all ${
+                  isPlayingNative && activePlayingVoice === 'male'
+                    ? 'bg-blue-600 text-white animate-pulse ring-4 ring-blue-300 scale-105'
+                    : 'bg-white hover:bg-blue-50 text-blue-700 border-2 border-blue-300'
+                }`}
+                title="Nghe Thầy David đọc mẫu câu này"
+              >
+                <span className="text-base">👨‍🏫</span>
+                <span>{isPlayingNative && activePlayingVoice === 'male' ? 'Thầy David đang đọc...' : 'Thầy David Đọc'}</span>
+                <Volume2 className={`w-4 h-4 ${isPlayingNative && activePlayingVoice === 'male' ? 'animate-bounce' : ''}`} />
+              </button>
+            </div>
           </div>
 
-          <h2 className="text-xl sm:text-2xl font-black text-slate-900 leading-snug">
+          <h2 className="text-2xl sm:text-3xl font-black text-slate-900 leading-snug">
             "{currentPrompt.targetSentence}"
           </h2>
 
-          <div className="flex flex-wrap items-center gap-3 pt-1 text-xs">
-            <span className="font-mono text-indigo-700 bg-white px-3 py-1 rounded-lg border border-blue-200 font-semibold">
+          <div className="flex flex-wrap items-center gap-3 pt-1 text-xs sm:text-sm">
+            <span className="font-mono text-indigo-700 bg-white px-3 py-1.5 rounded-xl border border-blue-200 font-bold">
               {currentPrompt.ipa}
             </span>
-            <span className="text-slate-600 italic">Dịch: "{currentPrompt.vietnameseMeaning}"</span>
+            <span className="text-slate-600 italic font-semibold">Dịch: "{currentPrompt.vietnameseMeaning}"</span>
           </div>
 
-          <div className="pt-2 text-xs text-indigo-900 bg-white/80 p-3 rounded-xl border border-indigo-100">
+          <div className="pt-2 text-xs sm:text-sm text-indigo-900 bg-white/95 p-4 rounded-2xl border border-indigo-100">
             <strong>🎯 Trọng tâm phát âm:</strong> {currentPrompt.keyPhonicsFocus}
           </div>
         </div>
 
-        {/* Recording Controls */}
-        <div className="flex flex-col items-center justify-center py-6 space-y-4 bg-slate-50 rounded-2xl border border-slate-200">
+        {/* Recording Section with Ultra-Responsive Live Micro */}
+        <div className="flex flex-col items-center justify-center py-8 px-4 space-y-5 bg-slate-50 rounded-3xl border border-slate-200">
           <div className="relative">
             {isRecording && (
-              <div className="absolute -inset-3 bg-rose-500/20 rounded-full animate-ping" />
+              <div
+                className="absolute -inset-4 bg-rose-500/30 rounded-full animate-ping pointer-events-none"
+                style={{ transform: `scale(${1 + audioLevel / 100})` }}
+              />
             )}
             <button
-              onClick={isRecording ? handleStopRecording : handleStartRecording}
-              className={`relative z-10 w-20 h-20 rounded-full flex items-center justify-center shadow-xl transition-all ${
+              onClick={handleToggleRecording}
+              className={`relative z-10 w-24 h-24 rounded-full flex items-center justify-center shadow-2xl transition-all ${
                 isRecording
-                  ? 'bg-rose-600 text-white scale-105'
-                  : 'bg-blue-600 hover:bg-blue-500 text-white hover:scale-105'
+                  ? 'bg-rose-600 hover:bg-rose-700 text-white scale-110 ring-4 ring-rose-300'
+                  : 'bg-blue-600 hover:bg-blue-500 text-white hover:scale-105 ring-4 ring-blue-200'
               }`}
+              title={isRecording ? 'Bấm để dừng thu âm' : 'Bấm vào Micro để luyện nói'}
             >
-              {isRecording ? <MicOff className="w-8 h-8" /> : <Mic className="w-8 h-8" />}
+              {isRecording ? <MicOff className="w-10 h-10 animate-pulse" /> : <Mic className="w-10 h-10" />}
             </button>
           </div>
 
+          {/* Real-time Audio Wave Visualizer */}
+          {isRecording && (
+            <div className="flex items-center space-x-1 h-8">
+              {[40, 70, 90, 60, 100, 50, 80, 60, 95, 45].map((h, i) => (
+                <div
+                  key={i}
+                  className="w-1.5 bg-rose-500 rounded-full animate-pulse transition-all"
+                  style={{
+                    height: `${Math.max(8, (h * audioLevel) / 100)}px`,
+                    animationDelay: `${i * 0.08}s`,
+                  }}
+                />
+              ))}
+            </div>
+          )}
+
           <div className="text-center space-y-1">
-            <p className="text-sm font-bold text-slate-800">
-              {isRecording ? 'Đang lắng nghe bạn nói...' : 'Nhấn vào Micro để bắt đầu luyện nói'}
+            <p className="text-base font-black text-slate-800">
+              {isRecording ? '🔴 Đang lắng nghe... Hãy đọc câu trên!' : 'Nhấn Micro để bắt đầu luyện nói'}
             </p>
             <p className="text-xs text-slate-500">
-              Hãy đọc to rõ ràng mẫu câu trên để AI chấm phát âm
+              Phát âm to, rõ ràng từng từ trong mẫu câu để AI phân tích chuẩn xác
             </p>
           </div>
 
-          {/* User Speech Transcription Display & Manual Edit */}
-          <div className="w-full max-w-lg p-4 rounded-xl bg-white border border-slate-300 space-y-2">
+          {/* User Transcript Display & Quick Insertion */}
+          <div className="w-full max-w-xl p-4 sm:p-5 rounded-2xl bg-white border border-slate-300 space-y-3 shadow-inner">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-slate-500 uppercase">Câu bạn vừa nói / Nhập văn bản:</span>
-              <button
-                onClick={() => {
-                  const sampleText = currentPrompt.targetSentence;
-                  setUserTranscript(sampleText);
-                }}
-                className="text-xs font-bold text-blue-600 hover:underline"
-              >
-                + Điền mẫu chuẩn
-              </button>
+              <span className="text-xs font-bold text-slate-500 uppercase">
+                {isRecording ? 'Đang nhận diện trực tiếp:' : 'Câu bạn vừa phát âm:'}
+              </span>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => {
+                    playSoundEffect('click');
+                    setUserTranscript(currentPrompt.targetSentence);
+                    setInterimTranscript('');
+                  }}
+                  className="text-xs font-bold text-blue-600 hover:text-blue-800 underline bg-blue-50 px-2.5 py-1 rounded-lg"
+                >
+                  + Điền câu mẫu chuẩn
+                </button>
+                {(userTranscript || interimTranscript) && (
+                  <button
+                    onClick={() => {
+                      playSoundEffect('click');
+                      setUserTranscript('');
+                      setInterimTranscript('');
+                      setEvalResult(null);
+                    }}
+                    className="text-xs font-bold text-rose-500 hover:underline bg-rose-50 px-2 py-1 rounded-lg"
+                  >
+                    Xóa
+                  </button>
+                )}
+              </div>
             </div>
+
+            <div className="min-h-[50px] p-3 bg-slate-50 rounded-xl border border-slate-200 flex flex-wrap items-center">
+              {userTranscript || interimTranscript ? (
+                <p className="text-sm sm:text-base font-bold text-slate-900">
+                  <span>{userTranscript}</span>
+                  {interimTranscript && (
+                    <span className="text-blue-500 italic ml-1.5 opacity-80">{interimTranscript}</span>
+                  )}
+                </p>
+              ) : (
+                <p className="text-xs text-slate-400 italic">
+                  Chưa có âm thanh. Nhấn Micro ở trên hoặc bấm "+ Điền câu mẫu chuẩn"...
+                </p>
+              )}
+            </div>
+
+            {/* Manual Edit Input */}
             <input
               type="text"
               value={userTranscript}
               onChange={(e) => setUserTranscript(e.target.value)}
-              placeholder="Nội dung giọng nói của bạn sẽ hiện ở đây, hoặc gõ vào đây..."
-              className="w-full px-3 py-2 text-sm font-semibold text-blue-900 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Bạn cũng có thể gõ hoặc chỉnh sửa câu trực tiếp tại đây..."
+              className="w-full px-3.5 py-2 text-xs sm:text-sm font-semibold text-slate-800 bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
 
           {errorMessage && (
-            <p className="text-xs text-rose-600 font-semibold flex items-center space-x-1">
-              <AlertCircle className="w-4 h-4" />
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 font-semibold flex items-center space-x-2 max-w-xl">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
               <span>{errorMessage}</span>
-            </p>
+            </div>
           )}
 
-          {/* Evaluate Action Button */}
-          {userTranscript && (
+          {/* Action Trigger */}
+          {(userTranscript || interimTranscript) && (
             <button
               onClick={() => handleEvaluateSpeaking()}
               disabled={isLoading}
-              className="px-6 py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-sm rounded-xl shadow-lg transition-all flex items-center space-x-2"
+              className="px-8 py-3.5 bg-emerald-600 hover:bg-emerald-500 text-white font-black text-sm sm:text-base rounded-2xl shadow-xl transition-all flex items-center space-x-2.5 hover:scale-105"
             >
               {isLoading ? (
                 <>
-                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <RefreshCw className="w-5 h-5 animate-spin" />
                   <span>AI Đang Phân Tích Giọng Nói...</span>
                 </>
               ) : (
                 <>
-                  <Sparkles className="w-4 h-4 text-amber-300" />
-                  <span>AI Chấm Phát Âm Chi Tiết</span>
+                  <Sparkles className="w-5 h-5 text-amber-300" />
+                  <span>AI Chấm Điểm Phát Âm Chi Tiết</span>
+                  <ArrowRight className="w-4 h-4" />
                 </>
               )}
             </button>
@@ -340,13 +506,13 @@ export const SpeakingTab: React.FC<SpeakingTabProps> = ({ speakingPrompts, onSki
 
       {/* AI Speaking Feedback Results */}
       {evalResult && (
-        <div className="bg-gradient-to-br from-slate-900 to-indigo-950 text-white rounded-3xl p-6 sm:p-8 border border-slate-800 space-y-6 shadow-2xl">
+        <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 text-white rounded-3xl p-6 sm:p-8 border border-slate-800 space-y-6 shadow-2xl">
           <div className="flex items-center justify-between border-b border-slate-800 pb-4">
             <div className="flex items-center space-x-2">
-              <Trophy className="w-6 h-6 text-amber-400" />
+              <Trophy className="w-6 h-6 text-amber-400 animate-bounce" />
               <h3 className="text-xl font-bold">Kết Quả Chấm Phát Âm Từ AI</h3>
             </div>
-            <span className="text-xs text-slate-400">Model: Gemini 3.6 Flash AI Coach</span>
+            <span className="text-xs text-slate-400">Gemini 3.6 Flash Voice Coach</span>
           </div>
 
           {/* Scores Overview Grid */}

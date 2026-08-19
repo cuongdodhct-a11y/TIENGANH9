@@ -1,0 +1,105 @@
+const fs = require('fs');
+
+const unitsData = [
+  {
+    id: 1,
+    title: 'Unit 1: Local Community',
+    theme: 'Cộng đồng địa phương & Làng nghề truyền thống',
+    description: 'Học về các hoạt động cộng đồng, làng nghề thủ công, động từ bất quy tắc và cụm động từ (Phrasal Verbs).',
+    pronunciationFocus: 'Ngữ âm: Phát âm chuẩn âm /f/ và /v/',
+    badgeIconName: 'Home',
+    vocabulary: [
+      { id: 'u1-v1', word: 'handicraft', phonetic: '/ˈhændikrɑːft/', partOfSpeech: 'noun', vietnameseMeaning: 'sản phẩm thủ công mỹ nghệ', englishExample: 'Pottery and silk weaving are popular handicrafts in Viet Nam.', vietnameseExample: 'Làm gốm và dệt lụa là những sản phẩm thủ công phổ biến ở Việt Nam.' },
+      { id: 'u1-v2', word: 'artisan', phonetic: '/ˌɑːtɪˈzæn/', partOfSpeech: 'noun', vietnameseMeaning: 'nghệ nhân', englishExample: 'The artisan spent three months making this lacquerware vase.', vietnameseExample: 'Nghệ nhân đã dành ba tháng để làm chiếc bình sơn mài này.' },
+      { id: 'u1-v3', word: 'pottery', phonetic: '/ˈpɒtəri/', partOfSpeech: 'noun', vietnameseMeaning: 'đồ gốm sứ', englishExample: 'Bat Trang is famous for its high-quality ceramic pottery.', vietnameseExample: 'Bát Tràng nổi tiếng với các sản phẩm đồ gốm sứ chất lượng cao.' },
+      { id: 'u1-v4', word: 'preserve', phonetic: '/prɪˈzɜːv/', partOfSpeech: 'verb', vietnameseMeaning: 'bảo tồn, giữ gìn', englishExample: 'We should preserve our traditional craft villages for future generations.', vietnameseExample: 'Chúng ta nên bảo tồn các làng nghề truyền thống cho các thế hệ tương lai.' },
+      { id: 'u1-v5', word: 'look after', phonetic: '/lʊk ˈɑːftə/', partOfSpeech: 'phrasal verb', vietnameseMeaning: 'chăm sóc, trông nom', englishExample: 'Community volunteers look after the elderly citizens in our neighborhood.', vietnameseExample: 'Tình nguyện viên cộng đồng chăm sóc những người cao tuổi trong xóm chúng tôi.' },
+      { id: 'u1-v6', word: 'pass down', phonetic: '/pɑːs daʊn/', partOfSpeech: 'phrasal verb', vietnameseMeaning: 'truyền lại (qua các thế hệ)', englishExample: 'Craft skills are passed down from grandparents to grandchildren.', vietnameseExample: 'Kỹ năng làm nghề thủ công được truyền lại từ ông bà cho con cháu.' },
+      { id: 'u1-v7', word: 'suburb', phonetic: '/ˈsʌbɜːb/', partOfSpeech: 'noun', vietnameseMeaning: 'vùng ngoại ô', englishExample: 'They moved to a quiet suburb near Ha Noi to enjoy fresh air.', vietnameseExample: 'Họ đã chuyển đến một vùng ngoại ô yên tĩnh gần Hà Nội để tận hưởng không khí trong lành.' },
+      { id: 'u1-v8', word: 'community helper', phonetic: '/kəˈmjuːnəti ˈhɛlpə/', partOfSpeech: 'noun', vietnameseMeaning: 'người trợ giúp cộng đồng', englishExample: 'Garbage collectors are essential community helpers who keep our city clean.', vietnameseExample: 'Những người thu gom rác là những người hỗ trợ cộng đồng thiết yếu giúp thành phố sạch đẹp.' }
+    ],
+    grammar: {
+      title: 'Cụm động từ (Phrasal Verbs) & Thì Quá khứ đơn vs Quá khứ tiếp diễn',
+      summary: 'Phrasal Verb bao gồm: Động từ + Giới từ / Tiểu từ. Ý nghĩa thường thay đổi so với động từ gốc.',
+      formulaBox: [
+        'Verb + Particle = Phrasal Verb (look after = care for, set up = establish, pass down = hand over)',
+        'S + V2/ed (Hành động cắt ngang) WHILE / WHEN S + was/were + V-ing (Hành động đang diễn ra)'
+      ],
+      usagePoints: [
+        { title: '1. Cụm động từ thông dụng Unit 1', detail: 'look after (chăm sóc), set up (thành lập), pass down (truyền lại), cut down on (cắt giảm), run out of (hết/cạn kiệt).', example: 'My uncle set up a pottery workshop in Bat Trang five years ago.' },
+        { title: '2. Phối hợp thì Quá khứ đơn & Quá khứ tiếp diễn', detail: 'Dùng When/While để diễn tả hành động đang diễn ra trong quá khứ thì có hành động khác xen vào.', example: 'While the artisan was shaping clay, a group of foreign tourists entered the workshop.' }
+      ],
+      exercises: [
+        { id: 'u1-g1', question: 'My grandparents _____ this lacquerware workshop in 1985.', options: ['A. set up', 'B. looked after', 'C. passed down', 'D. ran out'], correctAnswer: 'A. set up', explanation: '"Set up" có nghĩa là thành lập, mở xưởng/công ty.' },
+        { id: 'u1-g2', question: 'These weaving techniques have been _____ from generation to generation.', options: ['A. looked after', 'B. passed down', 'C. turned down', 'D. brought up'], correctAnswer: 'B. passed down', explanation: '"Pass down" nghĩa là truyền lại qua các thế hệ.' },
+        { id: 'u1-g3', question: 'While the artisans _____ clay vases, the visitors were taking photos.', options: ['A. shaped', 'B. were shaping', 'C. are shaping', 'D. have shaped'], correctAnswer: 'B. were shaping', explanation: 'Hành động đang diễn ra đồng thời trong quá khứ sau "While" chia Quá khứ tiếp diễn (were shaping).' },
+        { id: 'u1-g4', question: 'We decided to _____ on plastic bags when shopping at local markets.', options: ['A. cut down', 'B. run out', 'C. get on', 'D. look forward'], correctAnswer: 'A. cut down', explanation: '"Cut down on" có nghĩa là cắt giảm bớt tiêu thụ hoặc sử dụng.' },
+        { id: 'u1-g5', question: 'When the teacher entered the classroom, the students _____ about traditional crafts.', options: ['A. discussed', 'B. were discussing', 'C. discuss', 'D. have discussed'], correctAnswer: 'B. were discussing', explanation: 'Hành động đang diễn ra (were discussing) thì hành động khác cắt ngang (entered).' },
+        { id: 'u1-g6', question: 'Who is going to _____ your pets while you are on vacation in Bat Trang?', options: ['A. look after', 'B. pass down', 'C. find out', 'D. turn up'], correctAnswer: 'A. look after', explanation: '"Look after" có nghĩa là chăm sóc, trông nom.' }
+      ]
+    },
+    listening: {
+      audioTitle: 'Chuyến Tham Quan Làng Lụa Vạn Phúc (Van Phuc Silk Village)',
+      audioDuration: '2:15',
+      audioScriptSpeaker: 'Minh & Elena (Du khách quốc tế)',
+      transcriptText: "Minh: Welcome to Van Phuc Silk Village, Elena! This traditional craft village has a history of more than one thousand years.\nElena: Wow, the silk scarves displayed in these shops look exquisite and colourful!\nMinh: Yes, our local artisans use traditional wooden looms to weave high-quality silk. The skills have been passed down for many generations.\nElena: Are young people in the community continuing to learn this handicraft?\nMinh: Definitely. Many youth are setting up online shops to introduce Van Phuc silk to international customers.",
+      vietnameseTranslation: "Minh: Chào mừng bạn đến với Làng lụa Vạn Phúc, Elena! Làng nghề truyền thống này có lịch sử hơn 1.000 năm.\nElena: Ồ, những chiếc khăn lụa trưng bày trong các cửa hàng này trông thật tinh xảo và rực rỡ!\nMinh: Đúng vậy, các nghệ nhân địa phương sử dụng khung dệt gỗ truyền thống để dệt lụa chất lượng cao. Các kỹ năng đã được truyền lại qua nhiều thế hệ.\nElena: Giới trẻ trong cộng đồng có tiếp tục học nghề thủ công này không?\nMinh: Chắc chắn rồi. Nhiều bạn trẻ đang mở các cửa hàng trực tuyến để giới thiệu lụa Vạn Phúc tới khách hàng quốc tế.",
+      questions: [
+        { id: 'u1-l1', question: 'How long has Van Phuc Silk Village existed according to Minh?', options: ['A. Around one hundred years', 'B. More than one thousand years', 'C. Just fifty years', 'D. Exactly two centuries'], correctAnswerIndex: 1, explanation: 'Trong bài nghe: "This traditional craft village has a history of more than one thousand years."' },
+        { id: 'u1-l2', question: 'What equipment do the artisans use to weave silk?', options: ['A. Modern automatic computers', 'B. Traditional wooden looms', 'C. Plastic weaving machines', 'D. Metal printing presses'], correctAnswerIndex: 1, explanation: 'Trong bài nghe: "our local artisans use traditional wooden looms to weave high-quality silk."' },
+        { id: 'u1-l3', question: 'How are young people in the village promoting Van Phuc silk?', options: ['A. By giving up silk weaving', 'B. By setting up online shops for international customers', 'C. By moving to other countries', 'D. By selling imported clothes'], correctAnswerIndex: 1, explanation: 'Trong bài nghe: "Many youth are setting up online shops to introduce Van Phuc silk to international customers."' },
+        { id: 'u1-l4', question: 'Which phrasal verb is used to describe inheriting skills from ancestors?', options: ['A. Turn down', 'B. Pass down', 'C. Look after', 'D. Run out of'], correctAnswerIndex: 1, explanation: '"The skills have been passed down for many generations."' }
+      ],
+      fillInBlankExercises: [
+        { id: 'u1-f1', sentenceWithBlank: 'Van Phuc is a famous traditional _____ village in Ha Noi.', correctWord: 'silk', hint: 'Loại vải lụa mềm mại dệt từ tơ tằm' },
+        { id: 'u1-f2', sentenceWithBlank: 'The artisan skills have been _____ down through generations.', correctWord: 'passed', hint: 'Dạng quá khứ của từ truyền lại' }
+      ]
+    },
+    speakingPrompts: [
+      { id: 'u1-s1', targetSentence: 'Our local artisans pass down traditional pottery techniques to preserve our heritage.', ipa: '/ˈaʊər ˈləʊkəl ˈɑːtɪzænz pɑːs daʊn trəˈdɪʃənl ˈpɒtəri tɛkˈniːks tuː prɪˈzɜːv ˈaʊə ˈhɛrɪtɪʤ/', vietnameseMeaning: 'Các nghệ nhân địa phương của chúng tôi truyền lại kỹ thuật làm gốm truyền thống để bảo tồn di sản.', contextSituation: 'Nói về sự tự hào đối với các làng nghề truyền thống của quê hương.', keyPhonicsFocus: 'Luyện nối âm "pass down" và phát âm chuẩn /f/ trong "heritage".', sampleAudioText: 'Our local artisans pass down traditional pottery techniques to preserve our heritage.' },
+      { id: 'u1-s2', targetSentence: 'Community helpers work hard every day to keep our neighborhood safe and clean.', ipa: '/kəˈmjuːnəti ˈhɛlpəz wɜːk hɑːd ˈɛvrideɪ tuː kiːp ˈaʊə ˈneɪbəhʊd seɪf ænd kliːn/', vietnameseMeaning: 'Những người hỗ trợ cộng đồng làm việc chăm chỉ mỗi ngày để giữ cho khu phố an toàn và sạch sẽ.', contextSituation: 'Bày tỏ lòng biết ơn đối với những người lao động phục vụ cộng đồng.', keyPhonicsFocus: 'Phát âm chuẩn âm /p/ trong "helpers" và /f/ trong "safe".', sampleAudioText: 'Community helpers work hard every day to keep our neighborhood safe and clean.' },
+      { id: 'u1-s3', targetSentence: 'Young villagers are eager to set up eco-tourism projects to attract international visitors.', ipa: '/jʌŋ ˈvɪlɪʤəz ɑːr ˈiːɡə tuː sɛt ʌp ˈiːkəʊ-ˈtʊərɪzəm ˈprɒʤɛkts tuː əˈtrækt ˌɪntəˈnæʃənl ˈvɪzɪtəz/', vietnameseMeaning: 'Thanh niên trong làng rất hào hứng thành lập các dự án du lịch sinh thái để thu hút du khách quốc tế.', contextSituation: 'Thảo luận về các sáng kiến phát triển kinh tế bền vững tại địa phương.', keyPhonicsFocus: 'Nối âm "set up" và phát âm /v/ trong "villagers" và "visitors".', sampleAudioText: 'Young villagers are eager to set up eco-tourism projects to attract international visitors.' },
+      { id: 'u1-s4', targetSentence: 'We should cut down on plastic usage in our local community to protect the environment.', ipa: '/wiː ʃʊd kʌt daʊn ɒn ˈplæstɪk ˈjuːsɪʤ ɪn ˈaʊə ˈləʊkəl kəˈmjuːnəti tuː prəˈtɛkt ði ɪnˈvaɪərənmənt/', vietnameseMeaning: 'Chúng ta nên cắt giảm sử dụng nhựa trong cộng đồng địa phương để bảo vệ môi trường.', contextSituation: 'Kêu gọi hành động bảo vệ môi trường sống tại khu dân cư.', keyPhonicsFocus: 'Chú ý phát âm rõ cụm "cut down on" và âm /v/ trong "environment".', sampleAudioText: 'We should cut down on plastic usage in our local community to protect the environment.' },
+      { id: 'u1-s5', targetSentence: 'Bat Trang pottery village is famous for its hand-painted ceramic teasets and decorative vases.', ipa: '/bæt træŋ ˈpɒtəri ˈvɪlɪʤ ɪz ˈfeɪməs fɔːr ɪts hænd-ˈpeɪntɪd sɪˈræmɪk ˈtiːsɛts ænd ˈdɛkərətɪv ˈvɑːzɪz/', vietnameseMeaning: 'Làng gốm Bát Tràng nổi tiếng với các bộ ấm chén gốm vẽ tay và lọ hoa trang trí.', contextSituation: 'Giới thiệu các sản phẩm thủ công đặc sắc của Việt Nam với bạn bè quốc tế.', keyPhonicsFocus: 'Phát âm chuẩn âm /f/ trong "famous" và âm /v/ trong "vases".', sampleAudioText: 'Bat Trang pottery village is famous for its hand-painted ceramic teasets and decorative vases.' }
+    ],
+    reading: {
+      title: 'Bảo Tồn Các Làng Nghề Thủ Công Truyền Thống Việt Nam',
+      topic: 'Làng nghề truyền thống & Đời sống văn hóa',
+      passageText: "Traditional craft villages have played an integral part in Vietnamese culture for hundreds of years. Across the country, thousands of craft villages specialize in creating distinctive handicrafts such as Bat Trang ceramics, Dong Ho folk paintings, and Van Phuc silk.\n\nThese villages are not only production centers but also living museums that preserve ancestral values and artistic techniques. Each finished product reflects the patience, creativity, and dedication of skilled artisans.\n\nHowever, modern industrialization poses significant challenges. Mass-produced plastic and machine-made goods often compete fiercely with handmade items. To overcome this, many craft villages are combining handicraft production with cultural tourism, attracting both local and international visitors who want hands-on experiences.",
+      keyVocabularyHighlights: [
+        { word: 'integral', meaning: 'thiết yếu, không thể thiếu' },
+        { word: 'ancestral values', meaning: 'giá trị truyền thống của cha ông' },
+        { word: 'industrialization', meaning: 'quá trình công nghiệp hóa' },
+        { word: 'hands-on experience', meaning: 'trải nghiệm thực hành trực tiếp' }
+      ],
+      questions: [
+        { id: 'u1-r1', question: 'What is the main topic of the passage?', options: ['A. The history of modern plastic factories', 'B. Preserving traditional craft villages in modern Viet Nam', 'C. How to export foreign machines', 'D. Famous shopping malls in Ha Noi'], correctAnswerIndex: 1, explanation: 'Bài đọc phân tích vai trò và cách thức bảo tồn các làng nghề thủ công truyền thống ở Việt Nam hiện nay.' },
+        { id: 'u1-r2', question: 'Why are craft villages described as "living museums"?', options: ['A. Because they charge expensive entrance tickets', 'B. Because they preserve ancestral values and artistic techniques', 'C. Because nobody lives there anymore', 'D. Because only ancient people work there'], correctAnswerIndex: 1, explanation: 'Trong đoạn 2: "living museums that preserve ancestral values and artistic techniques."' },
+        { id: 'u1-r3', question: 'What major challenge do traditional craft villages face today?', options: ['A. Lack of tourists interested in culture', 'B. Competition from mass-produced and machine-made goods', 'C. Too much clean water and fresh air', 'D. High support from local authorities'], correctAnswerIndex: 1, explanation: 'Trong đoạn 3: "Mass-produced plastic and machine-made goods often compete fiercely with handmade items."' },
+        { id: 'u1-r4', question: 'How are many villages adapting to survive and thrive?', options: ['A. By closing their workshops permanently', 'B. By combining handicraft production with cultural tourism', 'C. By replacing all artisans with robots', 'D. By stopping all international visits'], correctAnswerIndex: 1, explanation: 'Trong đoạn 3: "many craft villages are combining handicraft production with cultural tourism."' }
+      ]
+    },
+    writing: {
+      id: 'u1-w1',
+      title: 'Write a paragraph about your local community or a traditional craft village (60-80 words)',
+      description: 'Viết một đoạn văn ngắn giới thiệu về cộng đồng nơi bạn sống hoặc một làng nghề truyền thống mà bạn yêu thích.',
+      suggestedOutline: [
+        'Introduction: Name and location of your community / craft village.',
+        'Body: What are the main features, people, or famous handicrafts there?',
+        'Conclusion: How do you feel about your community and how can we preserve it?'
+      ],
+      usefulPhrases: [
+        'My neighborhood is located in...',
+        'It is famous for traditional handicrafts such as...',
+        'The local artisans are very skillful and friendly...',
+        'We should preserve our local traditions by...'
+      ],
+      wordLimit: '60 - 80 từ',
+      sampleGrade10Response: 'I live in Bat Trang, a peaceful pottery village in the suburbs of Ha Noi. My village is world-famous for its ceramic products, which are shaped and painted by talented local artisans. These craft skills have been passed down for centuries. Today, many visitors come here to take part in pottery-making workshops. I take great pride in my hometown and believe young people should actively preserve these valuable traditions.'
+    }
+  }
+];
+
+// Let's write unit1.ts to test
+fs.writeFileSync('src/data/units/unit1.ts', 'import { UnitData } from "../../types";\n\nexport const UNIT_1_DATA: UnitData = ' + JSON.stringify(unitsData[0], null, 2) + ';\n');
+console.log("Unit 1 generated successfully");

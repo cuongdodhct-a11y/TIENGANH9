@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { GrammarSection } from '../../types';
 import { CheckCircle2, HelpCircle, Sparkles, Trophy, BookMarked, Volume2 } from 'lucide-react';
-import { playSoundEffect, speakEnglish, stopSpeaking } from '../../utils/audioHelpers';
+import { playSoundEffect, speakEnglish, stopSpeaking, getPreferredVoice, VoiceProfile } from '../../utils/audioHelpers';
 
 interface GrammarTabProps {
   grammarSection: GrammarSection;
@@ -15,15 +15,28 @@ export const GrammarTab: React.FC<GrammarTabProps> = ({ grammarSection, onSkillC
 
   const [activeSpeakingExample, setActiveSpeakingExample] = useState<string | null>(null);
 
-  const handleSpeakText = (text: string) => {
+  // Stop audio on unmount or tab switch
+  React.useEffect(() => {
+    return () => {
+      stopSpeaking();
+    };
+  }, []);
+
+  const handleSpeakText = (text: string, forcedVoice?: VoiceProfile) => {
+    playSoundEffect('click');
     if (activeSpeakingExample === text) {
       stopSpeaking();
       setActiveSpeakingExample(null);
     } else {
       setActiveSpeakingExample(text);
-      speakEnglish(text, 0.85, () => {
-        setActiveSpeakingExample(null);
-      });
+      speakEnglish(
+        text,
+        0.88,
+        () => {
+          setActiveSpeakingExample(null);
+        },
+        forcedVoice || getPreferredVoice()
+      );
     }
   };
 
@@ -95,17 +108,22 @@ export const GrammarTab: React.FC<GrammarTabProps> = ({ grammarSection, onSkillC
                   <p className="text-xs text-slate-600 leading-relaxed">{point.detail}</p>
                   <div className="p-2.5 rounded-xl bg-white border border-slate-200 text-xs font-medium text-indigo-900 italic flex items-center justify-between">
                     <span>👉 "{point.example}"</span>
-                    <button
-                      onClick={() => handleSpeakText(point.example)}
-                      className={`p-1.5 rounded-lg transition-colors flex items-center space-x-1 ${
-                        isSpeaking
-                          ? 'bg-amber-500 text-slate-900 font-bold animate-pulse'
-                          : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'
-                      }`}
-                      title="Nghe phát âm ví dụ"
-                    >
-                      <Volume2 className={`w-4 h-4 ${isSpeaking ? 'animate-bounce' : ''}`} />
-                    </button>
+                    <div className="flex items-center space-x-1">
+                      <button
+                        onClick={() => handleSpeakText(point.example, 'female')}
+                        className="px-1.5 py-1 rounded bg-rose-50 text-rose-700 hover:bg-rose-100 text-[10px] font-bold"
+                        title="Cô Emily phát âm"
+                      >
+                        👩‍🏫
+                      </button>
+                      <button
+                        onClick={() => handleSpeakText(point.example, 'male')}
+                        className="px-1.5 py-1 rounded bg-blue-50 text-blue-700 hover:bg-blue-100 text-[10px] font-bold"
+                        title="Thầy David phát âm"
+                      >
+                        👨‍🏫
+                      </button>
+                    </div>
                   </div>
                 </div>
               );
@@ -150,17 +168,22 @@ export const GrammarTab: React.FC<GrammarTabProps> = ({ grammarSection, onSkillC
                     </span>
                     <p className="text-sm sm:text-base font-bold text-slate-800">{ex.question}</p>
                   </div>
-                  <button
-                    onClick={() => handleSpeakText(ex.question)}
-                    className={`p-1.5 rounded-lg transition-colors shrink-0 ${
-                      isSpeakingEx
-                        ? 'bg-amber-500 text-slate-900 font-bold animate-pulse'
-                        : 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100'
-                    }`}
-                    title="Nghe câu hỏi"
-                  >
-                    <Volume2 className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center space-x-1 shrink-0">
+                    <button
+                      onClick={() => handleSpeakText(ex.question, 'female')}
+                      className="p-1.5 rounded-lg bg-rose-50 text-rose-700 hover:bg-rose-100 text-xs font-bold"
+                      title="Cô Emily đọc câu hỏi"
+                    >
+                      👩‍🏫
+                    </button>
+                    <button
+                      onClick={() => handleSpeakText(ex.question, 'male')}
+                      className="p-1.5 rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 text-xs font-bold"
+                      title="Thầy David đọc câu hỏi"
+                    >
+                      👨‍🏫
+                    </button>
+                  </div>
                 </div>
 
                 {ex.options && (

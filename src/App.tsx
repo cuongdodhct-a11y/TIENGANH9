@@ -5,6 +5,7 @@ import { UnitDetailView } from './components/UnitDetailView';
 import { MillionaireGame } from './components/games/MillionaireGame';
 import { SpeedReflexGame } from './components/games/SpeedReflexGame';
 import { SentenceScrambleGame } from './components/games/SentenceScrambleGame';
+import { WheelOfFortuneGame } from './components/games/WheelOfFortuneGame';
 import { PersonalizedPathModal } from './components/ai/PersonalizedPathModal';
 import { AITutorDrawer } from './components/ai/AITutorDrawer';
 import { AIQuizGeneratorModal } from './components/ai/AIQuizGeneratorModal';
@@ -16,7 +17,7 @@ import { Trophy, Gamepad2, Sparkles, BookOpen, Route, Flame } from 'lucide-react
 export function App() {
   const [currentTab, setCurrentTab] = useState<'units' | 'games' | 'route' | 'ai-quiz'>('units');
   const [selectedUnitId, setSelectedUnitId] = useState<number | null>(null);
-  const [selectedGame, setSelectedGame] = useState<'millionaire' | 'speed_reflex' | 'scramble'>('millionaire');
+  const [selectedGame, setSelectedGame] = useState<'wheel' | 'millionaire' | 'speed_reflex' | 'scramble'>('wheel');
 
   // AI Drawers and Modals
   const [isTutorOpen, setIsTutorOpen] = useState(false);
@@ -136,6 +137,16 @@ export function App() {
 
               <div className="flex flex-wrap items-center gap-2 bg-slate-900 p-1.5 rounded-2xl border border-slate-800">
                 <button
+                  onClick={() => setSelectedGame('wheel')}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${
+                    selectedGame === 'wheel'
+                      ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-slate-950 shadow-md font-black'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                >
+                  🎡 Chiếc Nón Kỳ Diệu
+                </button>
+                <button
                   onClick={() => setSelectedGame('millionaire')}
                   className={`px-4 py-2 rounded-xl text-xs font-bold transition-all ${
                     selectedGame === 'millionaire'
@@ -169,6 +180,7 @@ export function App() {
             </div>
 
             {/* Active Game */}
+            {selectedGame === 'wheel' && <WheelOfFortuneGame onAddPoints={handleAddPoints} />}
             {selectedGame === 'millionaire' && <MillionaireGame onAddPoints={handleAddPoints} />}
             {selectedGame === 'speed_reflex' && <SpeedReflexGame onAddPoints={handleAddPoints} />}
             {selectedGame === 'scramble' && <SentenceScrambleGame onAddPoints={handleAddPoints} />}
