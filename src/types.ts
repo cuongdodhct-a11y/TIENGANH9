@@ -4,7 +4,7 @@ export interface VocabularyItem {
   id: string;
   word: string;
   phonetic: string; // IPA e.g. /ˈhandikraːft/
-  partOfSpeech: 'noun' | 'verb' | 'adjective' | 'adverb' | 'phrasal verb' | 'idiom';
+  partOfSpeech: 'noun' | 'verb' | 'adjective' | 'adverb' | 'phrasal verb' | 'idiom' | 'phrase';
   vietnameseMeaning: string;
   englishExample: string;
   vietnameseExample: string;
