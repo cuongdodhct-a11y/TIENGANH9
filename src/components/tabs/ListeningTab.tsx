@@ -1,551 +1,1378 @@
-import React, { useState, useEffect } from 'react';
-import { ListeningSection } from '../../types';
-import { Volume2, Play, Pause, FileText, CheckCircle2, HelpCircle, Trophy } from 'lucide-react';
-import { playSoundEffect, speakEnglish, stopSpeaking, getPreferredVoice, VoiceProfile } from '../../utils/audioHelpers';
+import React, {
+  useEffect,
+  useMemo,
+  useState,
+} from 'react';
+
+import {
+  ListeningDialogueLine,
+  ListeningSection,
+} from '../../types';
+
+import {
+  Volume2,
+  Play,
+  Pause,
+  FileText,
+  CheckCircle2,
+  HelpCircle,
+  Trophy,
+  Users,
+  Square,
+} from 'lucide-react';
+
+import {
+  playSoundEffect,
+  speakEnglish,
+  speakDialogue,
+  stopSpeaking,
+  unlockBrowserSpeech,
+  getPreferredVoice,
+  VoiceProfile,
+  DialoguePlaybackLine,
+} from '../../utils/audioHelpers';
+
+// ============================================================================
+// PROPS
+// ============================================================================
 
 interface ListeningTabProps {
   listeningSection: ListeningSection;
   onSkillComplete: () => void;
 }
 
-export const ListeningTab: React.FC<ListeningTabProps> = ({ listeningSection, onSkillComplete }) => {
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [activeVoice, setActiveVoice] = useState<VoiceProfile | null>(null);
-  const [showTranscript, setShowTranscript] = useState(false);
-  const [showVietnamese, setShowVietnamese] = useState(false);
+// ============================================================================
+// SPEAKER RESOLUTION
+// ============================================================================
 
-  // Granular speech state
-  const [activeSpeakingText, setActiveSpeakingText] = useState<string | null>(null);
-  const [activeSpeakingVoice, setActiveSpeakingVoice] = useState<VoiceProfile | null>(null);
+const resolveSpeakerVoice = (
+  speaker: string
+): VoiceProfile => {
+  const normalized =
+    speaker
+      .toLowerCase()
+      .trim();
 
-  // Exercise state
-  const [userAnswers, setUserAnswers] = useState<Record<string, number>>({});
-  const [fillAnswers, setFillAnswers] = useState<Record<string, string>>({});
-  const [submitted, setSubmitted] = useState(false);
-  const [score, setScore] = useState(0);
+  // Explicit male markers.
+  const malePatterns = [
+    'mr.',
+    'mr ',
+    'mister',
+    'teacher',
+    'dad',
+    'father',
+    'boy',
+    'man',
+    'david',
+    'quang',
+    'nam',
+    'minh',
+    'tom',
+    'john',
+    'jack',
+  ];
 
-  // Stop audio on unmount or tab switch
+  // Explicit female markers.
+  const femalePatterns = [
+    'ms.',
+    'ms ',
+    'mrs.',
+    'mrs ',
+    'miss',
+    'mother',
+    'mom',
+    'girl',
+    'woman',
+    'emily',
+    'mi',
+    'lan',
+    'anna',
+    'mary',
+  ];
+
+  if (
+    malePatterns.some(
+      (pattern) =>
+        normalized.includes(
+          pattern
+        )
+    )
+  ) {
+    return 'male';
+  }
+
+  if (
+    femalePatterns.some(
+      (pattern) =>
+        normalized.includes(
+          pattern
+        )
+    )
+  ) {
+    return 'female';
+  }
+
+  // Default is female because Emily is the default teacher voice.
+  return 'female';
+};
+
+// ============================================================================
+// PARSE LEGACY TRANSCRIPT
+// ============================================================================
+
+const parseLegacyTranscript =
+  (
+    transcript: string
+  ): DialoguePlaybackLine[] => {
+    const lines =
+      transcript
+        .split(/\r?\n/)
+        .map(
+          (line) =>
+            line.trim()
+        )
+        .filter(Boolean);
+
+    const result: DialoguePlaybackLine[] =
+      [];
+
+    lines.forEach(
+      (
+        line,
+        index
+      ) => {
+        const match =
+          line.match(
+            /^([^:]{1,60}):\s*(.+)$/
+          );
+
+        if (match) {
+          const speaker =
+            match[1].trim();
+
+          const text =
+            match[2].trim();
+
+          result.push({
+            id: `legacy-${index}`,
+            speaker,
+            voice:
+              resolveSpeakerVoice(
+                speaker
+              ),
+            text,
+          });
+
+          return;
+        }
+
+        // If no speaker label exists,
+        // preserve the line and use the default voice.
+        result.push({
+          id: `line-${index}`,
+          speaker: 'Narrator',
+          voice: 'female',
+          text: line,
+        });
+      }
+    );
+
+    return result;
+  };
+
+// ============================================================================
+// BUILD DIALOGUE
+// ============================================================================
+
+const buildDialogue =
+  (
+    section: ListeningSection
+  ): DialoguePlaybackLine[] => {
+    if (
+      section.dialogue &&
+      section.dialogue.length
+    ) {
+      return section.dialogue
+        .filter(
+          (line) =>
+            Boolean(
+              line.text?.trim()
+            )
+        )
+        .map(
+          (line) => ({
+            id: line.id,
+            speaker:
+              line.speaker,
+            voice:
+              line.voice,
+            text:
+              line.text,
+          })
+        );
+    }
+
+    return parseLegacyTranscript(
+      section.transcriptText
+    );
+  };
+
+// ============================================================================
+// SPEAKER LABEL
+// ============================================================================
+
+const voiceLabel = (
+  voice: VoiceProfile
+): string =>
+  voice === 'female'
+    ? 'Cô Emily'
+    : 'Thầy David';
+
+const voiceIcon = (
+  voice: VoiceProfile
+): string =>
+  voice === 'female'
+    ? '👩‍🏫'
+    : '👨‍🏫';
+
+// ============================================================================
+// COMPONENT
+// ============================================================================
+
+export const ListeningTab: React.FC<
+  ListeningTabProps
+> = ({
+  listeningSection,
+  onSkillComplete,
+}) => {
+  const [
+    isPlayingDialogue,
+    setIsPlayingDialogue,
+  ] = useState(false);
+
+  const [
+    activeLineIndex,
+    setActiveLineIndex,
+  ] = useState(-1);
+
+  const [
+    activeSpeakingText,
+    setActiveSpeakingText,
+  ] = useState<string | null>(
+    null
+  );
+
+  const [
+    activeSpeakingVoice,
+    setActiveSpeakingVoice,
+  ] = useState<VoiceProfile | null>(
+    null
+  );
+
+  const [
+    showTranscript,
+    setShowTranscript,
+  ] = useState(false);
+
+  const [
+    showVietnamese,
+    setShowVietnamese,
+  ] = useState(false);
+
+  const [
+    userAnswers,
+    setUserAnswers,
+  ] = useState<
+    Record<string, number>
+  >({});
+
+  const [
+    fillAnswers,
+    setFillAnswers,
+  ] = useState<
+    Record<string, string>
+  >({});
+
+  const [
+    submitted,
+    setSubmitted,
+  ] = useState(false);
+
+  const [
+    score,
+    setScore,
+  ] = useState(0);
+
+  // ========================================================================
+  // DIALOGUE DATA
+  // ========================================================================
+
+  const dialogue =
+    useMemo(
+      () =>
+        buildDialogue(
+          listeningSection
+        ),
+      [listeningSection]
+    );
+
+  // ========================================================================
+  // CLEANUP
+  // ========================================================================
+
   useEffect(() => {
     return () => {
       stopSpeaking();
     };
   }, []);
 
-  const handleSpeakGranular = (text: string, forcedVoice?: VoiceProfile) => {
-    playSoundEffect('click');
-    const voiceToUse = forcedVoice || getPreferredVoice();
+  // ========================================================================
+  // PLAY SINGLE TEXT
+  // ========================================================================
 
-    if (activeSpeakingText === text && activeSpeakingVoice === voiceToUse) {
-      stopSpeaking();
-      setActiveSpeakingText(null);
-      setActiveSpeakingVoice(null);
-    } else {
-      setActiveSpeakingText(text);
-      setActiveSpeakingVoice(voiceToUse);
-      speakEnglish(
-        text,
-        0.9,
-        () => {
-          setActiveSpeakingText(null);
-          setActiveSpeakingVoice(null);
-        },
+  const handleSpeakText = (
+    text: string,
+    voice?: VoiceProfile
+  ) => {
+    // Prime SpeechSynthesis synchronously inside the user's click/tap.
+    // This improves fallback reliability in Cốc Cốc/Chromium.
+    unlockBrowserSpeech();
+
+    const voiceToUse =
+      voice ||
+      getPreferredVoice();
+
+    playSoundEffect('click');
+
+    if (
+      activeSpeakingText === text &&
+      activeSpeakingVoice ===
         voiceToUse
-      );
-    }
-  };
-
-  const handlePlayFullAudio = (forcedVoice?: VoiceProfile) => {
-    playSoundEffect('click');
-    const voiceToPlay = forcedVoice || getPreferredVoice();
-    if (isPlaying && activeVoice === voiceToPlay) {
+    ) {
       stopSpeaking();
-      setIsPlaying(false);
-      setActiveVoice(null);
-    } else {
-      setIsPlaying(true);
-      setActiveVoice(voiceToPlay);
-      speakEnglish(
-        listeningSection.transcriptText,
-        0.88,
-        () => {
-          setIsPlaying(false);
-          setActiveVoice(null);
-        },
-        voiceToPlay
+
+      setActiveSpeakingText(
+        null
       );
+
+      setActiveSpeakingVoice(
+        null
+      );
+
+      return;
     }
+
+    setActiveSpeakingText(text);
+    setActiveSpeakingVoice(
+      voiceToUse
+    );
+
+    void speakEnglish(
+      text,
+      0.88,
+      () => {
+        setActiveSpeakingText(
+          null
+        );
+
+        setActiveSpeakingVoice(
+          null
+        );
+      },
+      voiceToUse
+    );
   };
 
-  const handleSubmitListening = () => {
-    let totalCorrect = 0;
+  // ========================================================================
+  // PLAY WHOLE DIALOGUE
+  // ========================================================================
 
-    // Grade MC questions
-    listeningSection.questions.forEach((q) => {
-      if (userAnswers[q.id] === q.correctAnswerIndex) {
-        totalCorrect++;
+  const handlePlayDialogue =
+    () => {
+      // Prime SpeechSynthesis synchronously inside the user's click/tap.
+      unlockBrowserSpeech();
+
+      if (!dialogue.length) {
+        return;
       }
-    });
 
-    // Grade fill questions
-    if (listeningSection.fillInBlankExercises) {
-      listeningSection.fillInBlankExercises.forEach((f) => {
-        if (
-          fillAnswers[f.id] &&
-          fillAnswers[f.id].trim().toLowerCase() === f.correctWord.toLowerCase()
-        ) {
-          totalCorrect++;
+      playSoundEffect('click');
+
+      if (isPlayingDialogue) {
+        stopSpeaking();
+
+        setIsPlayingDialogue(
+          false
+        );
+
+        setActiveLineIndex(
+          -1
+        );
+
+        setActiveSpeakingText(
+          null
+        );
+
+        setActiveSpeakingVoice(
+          null
+        );
+
+        return;
+      }
+
+      setIsPlayingDialogue(
+        true
+      );
+
+      setActiveLineIndex(0);
+
+      void speakDialogue(
+        dialogue,
+        0.88,
+        {
+          onLineStart: (
+            line,
+            index
+          ) => {
+            setActiveLineIndex(
+              index
+            );
+
+            setActiveSpeakingText(
+              line.text
+            );
+
+            setActiveSpeakingVoice(
+              line.voice
+            );
+          },
+
+          onLineEnd: (
+            _line,
+            _index
+          ) => {
+            // The next line will update the UI.
+          },
+
+          onEnd: () => {
+            setIsPlayingDialogue(
+              false
+            );
+
+            setActiveLineIndex(
+              -1
+            );
+
+            setActiveSpeakingText(
+              null
+            );
+
+            setActiveSpeakingVoice(
+              null
+            );
+          },
         }
-      });
-    }
+      );
+    };
 
-    setScore(totalCorrect);
-    setSubmitted(true);
-    playSoundEffect('correct');
-    onSkillComplete();
+  // ========================================================================
+  // PLAY FULL TEXT WITH ONE VOICE
+  // ========================================================================
+
+  const handlePlayFullVoice = (
+    voice: VoiceProfile
+  ) => {
+    // Prime SpeechSynthesis synchronously inside the user's click/tap.
+    unlockBrowserSpeech();
+
+    playSoundEffect('click');
+
+    setActiveSpeakingText(
+      listeningSection.transcriptText
+    );
+
+    setActiveSpeakingVoice(
+      voice
+    );
+
+    void speakEnglish(
+      listeningSection.transcriptText,
+      0.88,
+      () => {
+        setActiveSpeakingText(
+          null
+        );
+
+        setActiveSpeakingVoice(
+          null
+        );
+      },
+      voice
+    );
   };
+
+  // ========================================================================
+  // SUBMIT
+  // ========================================================================
+
+  const handleSubmitListening =
+    () => {
+      let totalCorrect = 0;
+
+      listeningSection.questions.forEach(
+        (question) => {
+          if (
+            userAnswers[
+              question.id
+            ] ===
+            question.correctAnswerIndex
+          ) {
+            totalCorrect += 1;
+          }
+        }
+      );
+
+      listeningSection.fillInBlankExercises?.forEach(
+        (exercise) => {
+          const answer =
+            fillAnswers[
+              exercise.id
+            ];
+
+          if (
+            answer &&
+            answer
+              .trim()
+              .toLowerCase() ===
+              exercise.correctWord
+                .trim()
+                .toLowerCase()
+          ) {
+            totalCorrect += 1;
+          }
+        }
+      );
+
+      setScore(
+        totalCorrect
+      );
+
+      setSubmitted(true);
+
+      playSoundEffect(
+        'correct'
+      );
+
+      onSkillComplete();
+    };
+
+  // ========================================================================
+  // COUNTERS
+  // ========================================================================
 
   const totalQuestions =
-    listeningSection.questions.length + (listeningSection.fillInBlankExercises?.length || 0);
+    listeningSection.questions
+      .length +
+    (
+      listeningSection
+        .fillInBlankExercises
+        ?.length || 0
+    );
 
-  // Helper to extract lines from transcript
-  const getTranscriptLines = () => {
-    return listeningSection.transcriptText
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-  };
+  // ========================================================================
+  // RENDER
+  // ========================================================================
 
   return (
     <div className="space-y-8">
-      {/* Audio Player Header Card */}
+
+      {/* ================================================================
+          AUDIO HEADER
+      ================================================================ */}
+
       <div className="bg-slate-900 text-white rounded-3xl p-6 sm:p-8 border border-slate-800 shadow-xl space-y-6">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 border-b border-slate-800 pb-6">
-          <div className="space-y-2">
-            <div className="flex items-center space-x-2">
-              <span className="px-3 py-1 bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 rounded-full text-xs font-black uppercase tracking-wider">
-                Bài Nghe SGK Tiếng Anh 9
+
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
+
+          <div>
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+
+              <span className="px-3 py-1 bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 rounded-full text-xs font-black">
+                BÀI NGHE SGK TIẾNG ANH 9
               </span>
-              <span className="text-xs text-slate-400 font-medium">Thời lượng: ~2-3 phút</span>
+
+              <span className="text-xs text-slate-400">
+                {listeningSection.audioDuration}
+              </span>
+
             </div>
-            <h3 className="text-2xl font-black text-white">{listeningSection.title}</h3>
-            <p className="text-sm text-slate-300 max-w-xl">{listeningSection.audioDescription}</p>
+
+            <h3 className="text-2xl font-black">
+              {listeningSection.audioTitle}
+            </h3>
+
+            <p className="text-sm text-slate-400 mt-2">
+              {listeningSection.audioScriptSpeaker}
+            </p>
+
           </div>
 
-          {/* Teacher Voice Buttons for Full Audio */}
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+          {/* ============================================================
+              MAIN CONTROLS
+          ============================================================ */}
+
+          <div className="flex flex-wrap gap-2">
+
             <button
-              onClick={() => handlePlayFullAudio('female')}
-              className={`flex items-center justify-center space-x-2 px-5 py-3 rounded-2xl font-black text-xs shadow-lg transition-all ${
-                isPlaying && activeVoice === 'female'
-                  ? 'bg-gradient-to-r from-pink-600 to-rose-500 text-white ring-4 ring-rose-400/50 animate-pulse scale-105'
-                  : 'bg-slate-800 hover:bg-slate-700 text-rose-300 border border-rose-500/40'
+              onClick={
+                handlePlayDialogue
+              }
+              className={`flex items-center gap-2 px-5 py-3 rounded-2xl font-black text-xs transition-all ${
+                isPlayingDialogue
+                  ? 'bg-amber-500 text-slate-950 ring-4 ring-amber-300/30'
+                  : 'bg-gradient-to-r from-cyan-600 to-blue-600 text-white hover:scale-105'
               }`}
-              title="Nghe Cô Emily đọc toàn bộ bài nghe"
             >
-              <span className="text-base">👩‍🏫</span>
-              <span>{isPlaying && activeVoice === 'female' ? 'Cô Emily đang đọc...' : 'Cô Emily đọc toàn bài'}</span>
-              {isPlaying && activeVoice === 'female' ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 fill-current" />}
+              {isPlayingDialogue ? (
+                <>
+                  <Pause className="w-4 h-4" />
+                  Dừng hội thoại
+                </>
+              ) : (
+                <>
+                  <Play className="w-4 h-4 fill-current" />
+                  ▶ Phát hội thoại
+                </>
+              )}
             </button>
 
             <button
-              onClick={() => handlePlayFullAudio('male')}
-              className={`flex items-center justify-center space-x-2 px-5 py-3 rounded-2xl font-black text-xs shadow-lg transition-all ${
-                isPlaying && activeVoice === 'male'
-                  ? 'bg-gradient-to-r from-blue-600 to-cyan-500 text-white ring-4 ring-cyan-400/50 animate-pulse scale-105'
-                  : 'bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-500/40'
-              }`}
-              title="Nghe Thầy David đọc toàn bộ bài nghe"
+              onClick={() =>
+                handlePlayFullVoice(
+                  'female'
+                )
+              }
+              className="px-4 py-3 rounded-2xl bg-rose-500/15 border border-rose-400/30 text-rose-300 text-xs font-bold hover:bg-rose-500/25"
             >
-              <span className="text-base">👨‍🏫</span>
-              <span>{isPlaying && activeVoice === 'male' ? 'Thầy David đang đọc...' : 'Thầy David đọc toàn bài'}</span>
-              {isPlaying && activeVoice === 'male' ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 fill-current" />}
+              👩‍🏫 Cô Emily
             </button>
+
+            <button
+              onClick={() =>
+                handlePlayFullVoice(
+                  'male'
+                )
+              }
+              className="px-4 py-3 rounded-2xl bg-blue-500/15 border border-blue-400/30 text-blue-300 text-xs font-bold hover:bg-blue-500/25"
+            >
+              👨‍🏫 Thầy David
+            </button>
+
           </div>
         </div>
 
-        {/* Audio Wave & Status Indicator */}
+        {/* ================================================================
+            STATUS
+        ================================================================ */}
+
         <div className="flex items-center justify-between bg-slate-950/60 p-4 rounded-2xl border border-slate-800">
-          <div className="flex items-center space-x-3">
+
+          <div className="flex items-center gap-3">
+
             <div
               className={`p-3 rounded-xl ${
-                isPlaying ? 'bg-cyan-500 text-white animate-pulse' : 'bg-slate-800 text-slate-400'
+                isPlayingDialogue
+                  ? 'bg-cyan-500 text-white animate-pulse'
+                  : 'bg-slate-800 text-slate-400'
               }`}
             >
-              <Volume2 className="w-5 h-5" />
+              {isPlayingDialogue ? (
+                <Volume2 className="w-5 h-5" />
+              ) : (
+                <Square className="w-5 h-5" />
+              )}
             </div>
+
             <div>
               <p className="text-xs font-bold text-slate-300">
-                {isPlaying
-                  ? `Đang phát âm thanh (${activeVoice === 'female' ? '👩‍🏫 Cô Emily' : '👨‍🏫 Thầy David'})`
-                  : 'Sẵn sàng phát âm thanh (Chất lượng bản ngữ US Native)'}
+
+                {isPlayingDialogue
+                  ? activeLineIndex >=
+                      0 &&
+                    dialogue[
+                      activeLineIndex
+                    ]
+                    ? `${voiceIcon(
+                        dialogue[
+                          activeLineIndex
+                        ].voice
+                      )} ${
+                        dialogue[
+                          activeLineIndex
+                        ].speaker
+                      } đang nói`
+                    : 'Đang chuẩn bị...'
+                  : 'Sẵn sàng phát bài nghe'}
+
               </p>
-              <p className="text-[11px] text-slate-500">Bấm từng câu bên dưới để nghe phát âm chi tiết</p>
+
+              <p className="text-[11px] text-slate-500">
+                Hệ thống đọc tuần tự từng lượt thoại, không chồng âm.
+              </p>
             </div>
+
           </div>
 
-          {/* Equalizer Visualizer */}
-          <div className="flex items-end space-x-1 h-6">
-            {[40, 70, 30, 90, 60, 80, 45, 95, 50, 75].map((height, i) => (
-              <div
-                key={i}
-                className={`w-1 rounded-full transition-all duration-150 ${
-                  isPlaying ? 'bg-gradient-to-t from-cyan-500 to-blue-400 animate-pulse' : 'bg-slate-800'
-                }`}
-                style={{
-                  height: isPlaying ? `${(height * (i % 2 === 0 ? 0.9 : 1.1)) % 100}%` : '20%',
-                }}
-              />
-            ))}
+          <div className="hidden sm:flex items-center gap-1 h-6">
+
+            {[
+              30,
+              65,
+              45,
+              85,
+              55,
+              75,
+              40,
+              90,
+            ].map(
+              (height, index) => (
+                <div
+                  key={index}
+                  className={`w-1 rounded-full ${
+                    isPlayingDialogue
+                      ? 'bg-cyan-400 animate-pulse'
+                      : 'bg-slate-700'
+                  }`}
+                  style={{
+                    height: `${height}%`,
+                  }}
+                />
+              )
+            )}
+
           </div>
+
         </div>
 
-        {/* Transcript Toggle */}
-        <div className="pt-2 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2">
+        {/* ================================================================
+            TRANSCRIPT BUTTON
+        ================================================================ */}
+
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-800 pt-4">
+
           <button
-            onClick={() => setShowTranscript(!showTranscript)}
-            className="flex items-center space-x-1.5 text-xs font-bold text-blue-300 hover:text-white bg-slate-800 px-3.5 py-2 rounded-xl border border-slate-700 transition-colors"
+            onClick={() =>
+              setShowTranscript(
+                (value) => !value
+              )
+            }
+            className="flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-800 border border-slate-700 text-cyan-300 text-xs font-bold"
           >
-            <FileText className="w-4 h-4 text-cyan-400" />
-            <span>{showTranscript ? 'Ẩn Lời Bài Nghe (Transcript)' : 'Hiện Lời Bài Nghe (Transcript)'}</span>
+            <FileText className="w-4 h-4" />
+
+            {showTranscript
+              ? 'Ẩn lời bài nghe'
+              : 'Hiện lời bài nghe'}
           </button>
 
           {showTranscript && (
             <button
-              onClick={() => setShowVietnamese(!showVietnamese)}
-              className="text-xs font-bold text-amber-300 bg-amber-500/10 border border-amber-500/30 px-3 py-1.5 rounded-lg"
+              onClick={() =>
+                setShowVietnamese(
+                  (value) => !value
+                )
+              }
+              className="px-4 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-bold"
             >
-              {showVietnamese ? 'Tắt Dịch Tiếng Việt' : 'Xem Dịch Tiếng Việt'}
+              {showVietnamese
+                ? 'Ẩn dịch tiếng Việt'
+                : 'Xem dịch tiếng Việt'}
             </button>
           )}
+
         </div>
 
-        {/* Transcript Box with Sentence-by-Sentence Audio */}
+        {/* ================================================================
+            DIALOGUE TRANSCRIPT
+        ================================================================ */}
+
         {showTranscript && (
-          <div className="p-5 rounded-2xl bg-slate-800/90 border border-slate-700 text-sm leading-relaxed space-y-3 font-sans">
-            <div className="space-y-2">
-              {getTranscriptLines().map((line, lIdx) => {
-                const isLineActive = activeSpeakingText === line;
+          <div className="space-y-3">
+
+            {dialogue.map(
+              (
+                line,
+                index
+              ) => {
+                const active =
+                  index ===
+                  activeLineIndex;
+
                 return (
                   <div
-                    key={lIdx}
-                    className={`p-2.5 rounded-xl transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
-                      isLineActive ? 'bg-slate-900 border border-cyan-500 shadow-md' : 'hover:bg-slate-700/60'
+                    key={line.id}
+                    className={`p-4 rounded-2xl border transition-all ${
+                      active
+                        ? 'bg-slate-800 border-cyan-400 shadow-lg'
+                        : 'bg-slate-950/50 border-slate-800'
                     }`}
                   >
-                    <p className="text-slate-100 font-medium italic">{line}</p>
-                    <div className="flex items-center space-x-1 shrink-0 self-end sm:self-center">
-                      <button
-                        onClick={() => handleSpeakGranular(line, 'female')}
-                        className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all ${
-                          isLineActive && activeSpeakingVoice === 'female'
-                            ? 'bg-rose-500 text-white'
-                            : 'bg-slate-700 hover:bg-rose-900/50 text-rose-300 border border-rose-500/30'
-                        }`}
-                        title="Cô Emily đọc câu này"
-                      >
-                        👩‍🏫 Cô Emily
-                      </button>
-                      <button
-                        onClick={() => handleSpeakGranular(line, 'male')}
-                        className={`px-2 py-1 rounded-lg text-[10px] font-bold transition-all ${
-                          isLineActive && activeSpeakingVoice === 'male'
-                            ? 'bg-blue-600 text-white'
-                            : 'bg-slate-700 hover:bg-blue-900/50 text-cyan-300 border border-cyan-500/30'
-                        }`}
-                        title="Thầy David đọc câu này"
-                      >
-                        👨‍🏫 Thầy David
-                      </button>
+
+                    <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+
+                      <div className="flex-1">
+
+                        <div className="flex items-center gap-2 mb-2">
+
+                          <span
+                            className={`px-2 py-1 rounded-lg text-[10px] font-black ${
+                              line.voice ===
+                              'female'
+                                ? 'bg-rose-500/20 text-rose-300'
+                                : 'bg-blue-500/20 text-blue-300'
+                            }`}
+                          >
+                            {voiceIcon(
+                              line.voice
+                            )}{' '}
+                            {line.speaker}
+                          </span>
+
+                          {active && (
+                            <span className="text-[10px] text-cyan-300 font-bold animate-pulse">
+                              ĐANG PHÁT
+                            </span>
+                          )}
+
+                        </div>
+
+                        <p className="text-sm leading-relaxed text-slate-100">
+                          {line.text}
+                        </p>
+
+                      </div>
+
+                      <div className="flex gap-1 shrink-0">
+
+                        <button
+                          onClick={() =>
+                            handleSpeakText(
+                              line.text,
+                              'female'
+                            )
+                          }
+                          className={`px-2 py-1 rounded-lg text-[10px] font-bold ${
+                            activeSpeakingText ===
+                              line.text &&
+                            activeSpeakingVoice ===
+                              'female'
+                              ? 'bg-rose-500 text-white'
+                              : 'bg-rose-500/10 text-rose-300 border border-rose-500/30'
+                          }`}
+                        >
+                          👩‍🏫
+                        </button>
+
+                        <button
+                          onClick={() =>
+                            handleSpeakText(
+                              line.text,
+                              'male'
+                            )
+                          }
+                          className={`px-2 py-1 rounded-lg text-[10px] font-bold ${
+                            activeSpeakingText ===
+                              line.text &&
+                            activeSpeakingVoice ===
+                              'male'
+                              ? 'bg-blue-500 text-white'
+                              : 'bg-blue-500/10 text-blue-300 border border-blue-500/30'
+                          }`}
+                        >
+                          👨‍🏫
+                        </button>
+
+                      </div>
+
                     </div>
+
                   </div>
                 );
-              })}
-            </div>
+              }
+            )}
 
             {showVietnamese && (
-              <div className="pt-3 border-t border-slate-700/80 text-amber-200 text-xs leading-relaxed">
-                <p className="font-bold text-amber-300 mb-1">Bản Dịch Tiếng Việt:</p>
-                <p className="whitespace-pre-line">{listeningSection.vietnameseTranslation}</p>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+              <div className="mt-4 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-200 text-sm leading-relaxed">
 
-      {/* Listening Comprehension Exercises */}
-      <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 space-y-6 shadow-sm">
-        <div className="flex items-center justify-between border-b border-slate-100 pb-4">
-          <div>
-            <h4 className="text-lg font-bold text-slate-900">Bài Tập Đọc Hiểu - Nghe SGK 9</h4>
-            <p className="text-xs text-slate-500">Nghe phát âm từng câu hỏi và trả lời các bài tập bên dưới</p>
-          </div>
-          {submitted && (
-            <div className="flex items-center space-x-2 bg-emerald-100 text-emerald-800 font-bold text-xs px-3 py-1.5 rounded-xl">
-              <Trophy className="w-4 h-4 text-emerald-600" />
-              <span>
-                Đúng {score}/{totalQuestions} câu
-              </span>
-            </div>
-          )}
-        </div>
-
-        {/* Multiple Choice Questions with Granular Audio */}
-        <div className="space-y-6">
-          {listeningSection.questions.map((q, qIdx) => {
-            const isUserCorrect = userAnswers[q.id] === q.correctAnswerIndex;
-            const isQuestionSpeaking = activeSpeakingText === q.question;
-
-            return (
-              <div key={q.id} className="p-5 rounded-2xl bg-slate-50 border border-slate-200 space-y-4 shadow-sm">
-                {/* Question Row with Dual Teacher Audio Buttons */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-3.5 rounded-xl border border-slate-200">
-                  <p className="text-sm font-bold text-slate-800 leading-snug">
-                    <span className="text-blue-600 font-black mr-1">Câu {qIdx + 1}:</span> {q.question}
-                  </p>
-
-                  <div className="flex items-center space-x-1.5 shrink-0">
-                    <button
-                      onClick={() => handleSpeakGranular(q.question, 'female')}
-                      className={`flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
-                        isQuestionSpeaking && activeSpeakingVoice === 'female'
-                          ? 'bg-rose-500 text-white ring-2 ring-rose-300 animate-pulse'
-                          : 'bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200'
-                      }`}
-                      title="Cô Emily đọc câu hỏi này"
-                    >
-                      <span>👩‍🏫</span>
-                      <span>{isQuestionSpeaking && activeSpeakingVoice === 'female' ? 'Đang đọc...' : 'Cô Emily'}</span>
-                      <Volume2 className="w-3.5 h-3.5" />
-                    </button>
-
-                    <button
-                      onClick={() => handleSpeakGranular(q.question, 'male')}
-                      className={`flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs font-bold transition-all ${
-                        isQuestionSpeaking && activeSpeakingVoice === 'male'
-                          ? 'bg-blue-600 text-white ring-2 ring-blue-300 animate-pulse'
-                          : 'bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200'
-                      }`}
-                      title="Thầy David đọc câu hỏi này"
-                    >
-                      <span>👨‍🏫</span>
-                      <span>{isQuestionSpeaking && activeSpeakingVoice === 'male' ? 'Đang đọc...' : 'Thầy David'}</span>
-                      <Volume2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
+                <div className="font-black text-amber-300 mb-2">
+                  Bản dịch tiếng Việt
                 </div>
 
-                {/* Options with Option-level Audio Buttons */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  {q.options.map((opt, optIdx) => {
-                    const isSelected = userAnswers[q.id] === optIdx;
-                    const isCorrect = optIdx === q.correctAnswerIndex;
-                    const isOptSpeaking = activeSpeakingText === opt;
+                <div className="whitespace-pre-line">
+                  {
+                    listeningSection.vietnameseTranslation
+                  }
+                </div>
 
-                    let style = 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200';
-                    if (submitted) {
-                      if (isCorrect) style = 'bg-emerald-600 text-white border-emerald-700';
-                      else if (isSelected) style = 'bg-rose-600 text-white border-rose-700';
-                    } else if (isSelected) {
-                      style = 'bg-blue-600 text-white border-blue-700 shadow-sm';
-                    }
+              </div>
+            )}
 
-                    return (
-                      <div
-                        key={optIdx}
+          </div>
+        )}
+
+      </div>
+
+      {/* ================================================================
+          EXERCISES
+      ================================================================ */}
+
+      <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-sm space-y-6">
+
+        <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+
+          <div>
+            <h4 className="text-lg font-black text-slate-900">
+              Bài tập nghe hiểu
+            </h4>
+
+            <p className="text-xs text-slate-500 mt-1">
+              Nghe câu hỏi, chọn đáp án và kiểm tra kết quả.
+            </p>
+          </div>
+
+          {submitted && (
+            <div className="flex items-center gap-2 bg-emerald-100 text-emerald-800 px-3 py-2 rounded-xl text-xs font-black">
+              <Trophy className="w-4 h-4" />
+              Đúng {score}/
+              {totalQuestions}
+            </div>
+          )}
+
+        </div>
+
+        {/* ================================================================
+            MULTIPLE CHOICE
+        ================================================================ */}
+
+        <div className="space-y-5">
+
+          {listeningSection.questions.map(
+            (
+              question,
+              questionIndex
+            ) => {
+              const selected =
+                userAnswers[
+                  question.id
+                ];
+
+              const correct =
+                selected ===
+                question.correctAnswerIndex;
+
+              return (
+                <div
+                  key={question.id}
+                  className="p-5 rounded-2xl bg-slate-50 border border-slate-200 space-y-4"
+                >
+
+                  <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+
+                    <p className="text-sm font-bold text-slate-800">
+                      <span className="text-blue-600 mr-1">
+                        Câu{' '}
+                        {questionIndex +
+                          1}
+                        :
+                      </span>
+
+                      {question.question}
+                    </p>
+
+                    <div className="flex gap-1 shrink-0">
+
+                      <button
                         onClick={() =>
-                          !submitted && setUserAnswers((prev) => ({ ...prev, [q.id]: optIdx }))
+                          handleSpeakText(
+                            question.question,
+                            'female'
+                          )
                         }
-                        className={`p-3 rounded-xl text-xs sm:text-sm font-semibold border text-left flex items-center justify-between transition-all cursor-pointer ${style}`}
+                        className="px-2 py-1 rounded-lg bg-rose-50 text-rose-700 border border-rose-200 text-[10px] font-bold"
                       >
-                        <span className="pr-2">{opt}</span>
+                        👩‍🏫
+                      </button>
 
-                        <div className="flex items-center space-x-1 shrink-0">
-                          {/* Option Audio Listen Buttons */}
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleSpeakGranular(opt, 'female');
+                      <button
+                        onClick={() =>
+                          handleSpeakText(
+                            question.question,
+                            'male'
+                          )
+                        }
+                        className="px-2 py-1 rounded-lg bg-blue-50 text-blue-700 border border-blue-200 text-[10px] font-bold"
+                      >
+                        👨‍🏫
+                      </button>
+
+                    </div>
+
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+
+                    {question.options.map(
+                      (
+                        option,
+                        optionIndex
+                      ) => {
+                        const isSelected =
+                          selected ===
+                          optionIndex;
+
+                        const isCorrect =
+                          optionIndex ===
+                          question.correctAnswerIndex;
+
+                        let style =
+                          'bg-white text-slate-700 border-slate-200 hover:bg-slate-100';
+
+                        if (
+                          submitted
+                        ) {
+                          if (
+                            isCorrect
+                          ) {
+                            style =
+                              'bg-emerald-600 text-white border-emerald-700';
+                          } else if (
+                            isSelected
+                          ) {
+                            style =
+                              'bg-rose-600 text-white border-rose-700';
+                          }
+                        } else if (
+                          isSelected
+                        ) {
+                          style =
+                            'bg-blue-600 text-white border-blue-700';
+                        }
+
+                        return (
+                          <div
+                            key={
+                              optionIndex
+                            }
+                            className={`p-3 rounded-xl border text-sm font-semibold flex items-center justify-between gap-2 cursor-pointer ${style}`}
+                            onClick={() => {
+                              if (
+                                !submitted
+                              ) {
+                                setUserAnswers(
+                                  (
+                                    previous
+                                  ) => ({
+                                    ...previous,
+                                    [question.id]:
+                                      optionIndex,
+                                  })
+                                );
+                              }
                             }}
-                            className={`p-1 rounded-md text-[10px] transition-all ${
-                              isOptSpeaking && activeSpeakingVoice === 'female'
-                                ? 'bg-rose-500 text-white'
-                                : isSelected && !submitted
-                                ? 'bg-blue-700 text-white hover:bg-blue-800'
-                                : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200'
-                            }`}
-                            title="Nghe Cô Emily phát âm phương án này"
+                          >
+
+                            <span>
+                              {option}
+                            </span>
+
+                            <div className="flex gap-1 shrink-0">
+
+                              <button
+                                onClick={(
+                                  event
+                                ) => {
+                                  event.stopPropagation();
+
+                                  handleSpeakText(
+                                    option,
+                                    'female'
+                                  );
+                                }}
+                                className="px-1.5 py-1 rounded-md bg-rose-50 text-rose-700"
+                              >
+                                👩‍🏫
+                              </button>
+
+                              <button
+                                onClick={(
+                                  event
+                                ) => {
+                                  event.stopPropagation();
+
+                                  handleSpeakText(
+                                    option,
+                                    'male'
+                                  );
+                                }}
+                                className="px-1.5 py-1 rounded-md bg-blue-50 text-blue-700"
+                              >
+                                👨‍🏫
+                              </button>
+
+                              {submitted &&
+                                isCorrect && (
+                                  <CheckCircle2 className="w-4 h-4 text-white" />
+                                )}
+
+                            </div>
+
+                          </div>
+                        );
+                      }
+                    )}
+
+                  </div>
+
+                  {submitted && (
+                    <div
+                      className={`p-4 rounded-xl text-xs ${
+                        correct
+                          ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                          : 'bg-rose-50 text-rose-800 border border-rose-200'
+                      }`}
+                    >
+
+                      <div className="flex items-center justify-between gap-3">
+
+                        <div>
+                          <div className="font-black flex items-center gap-1">
+                            <HelpCircle className="w-4 h-4" />
+                            Giải thích
+                          </div>
+
+                          <p className="mt-2 leading-relaxed">
+                            {
+                              question.explanation
+                            }
+                          </p>
+                        </div>
+
+                        <div className="flex gap-1 shrink-0">
+
+                          <button
+                            onClick={() =>
+                              handleSpeakText(
+                                question.explanation,
+                                'female'
+                              )
+                            }
+                            className="px-2 py-1 rounded bg-white border border-rose-200 text-rose-700 font-bold"
                           >
                             👩‍🏫
                           </button>
 
                           <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleSpeakGranular(opt, 'male');
-                            }}
-                            className={`p-1 rounded-md text-[10px] transition-all ${
-                              isOptSpeaking && activeSpeakingVoice === 'male'
-                                ? 'bg-blue-600 text-white'
-                                : isSelected && !submitted
-                                ? 'bg-blue-700 text-white hover:bg-blue-800'
-                                : 'bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200'
-                            }`}
-                            title="Nghe Thầy David phát âm phương án này"
+                            onClick={() =>
+                              handleSpeakText(
+                                question.explanation,
+                                'male'
+                              )
+                            }
+                            className="px-2 py-1 rounded bg-white border border-blue-200 text-blue-700 font-bold"
                           >
                             👨‍🏫
                           </button>
 
-                          {submitted && isCorrect && <CheckCircle2 className="w-4 h-4 text-white ml-1" />}
                         </div>
+
                       </div>
-                    );
-                  })}
-                </div>
 
-                {submitted && (
-                  <div
-                    className={`p-3.5 rounded-xl text-xs space-y-1.5 ${
-                      isUserCorrect
-                        ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                        : 'bg-rose-50 text-rose-800 border border-rose-200'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <p className="font-bold flex items-center space-x-1">
-                        <HelpCircle className="w-4 h-4" />
-                        <span>Giải thích:</span>
-                      </p>
-                      <div className="flex items-center space-x-1">
-                        <button
-                          onClick={() => handleSpeakGranular(q.explanation, 'female')}
-                          className="px-2 py-0.5 rounded bg-white text-rose-700 border border-rose-200 text-[10px] font-bold"
-                          title="Cô Emily đọc giải thích"
-                        >
-                          👩‍🏫 Nghe giải thích
-                        </button>
-                        <button
-                          onClick={() => handleSpeakGranular(q.explanation, 'male')}
-                          className="px-2 py-0.5 rounded bg-white text-blue-700 border border-blue-200 text-[10px] font-bold"
-                          title="Thầy David đọc giải thích"
-                        >
-                          👨‍🏫 Nghe giải thích
-                        </button>
-                      </div>
-                    </div>
-                    <p className="leading-relaxed">{q.explanation}</p>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-
-          {/* Fill in Blank Exercises with Granular Audio */}
-          {listeningSection.fillInBlankExercises &&
-            listeningSection.fillInBlankExercises.map((fillEx, fIdx) => {
-              const isSentSpeaking = activeSpeakingText === fillEx.sentenceWithBlank;
-              return (
-                <div key={fillEx.id} className="p-5 rounded-2xl bg-slate-50 border border-slate-200 space-y-3 shadow-sm">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    <p className="text-sm font-bold text-slate-800">
-                      Điền từ thích hợp vào chỗ trống ({fIdx + 1}):
-                    </p>
-                    <div className="flex items-center space-x-1.5">
-                      <button
-                        onClick={() => handleSpeakGranular(fillEx.sentenceWithBlank, 'female')}
-                        className={`flex items-center space-x-1 px-2 py-0.5 rounded-lg text-xs font-bold transition-all ${
-                          isSentSpeaking && activeSpeakingVoice === 'female'
-                            ? 'bg-rose-500 text-white'
-                            : 'bg-white text-rose-700 border border-rose-200 hover:bg-rose-50'
-                        }`}
-                        title="Cô Emily đọc câu này"
-                      >
-                        <span>👩‍🏫 Cô Emily</span>
-                        <Volume2 className="w-3 h-3" />
-                      </button>
-                      <button
-                        onClick={() => handleSpeakGranular(fillEx.sentenceWithBlank, 'male')}
-                        className={`flex items-center space-x-1 px-2 py-0.5 rounded-lg text-xs font-bold transition-all ${
-                          isSentSpeaking && activeSpeakingVoice === 'male'
-                            ? 'bg-blue-600 text-white'
-                            : 'bg-white text-blue-700 border border-blue-200 hover:bg-blue-50'
-                        }`}
-                        title="Thầy David đọc câu này"
-                      >
-                        <span>👨‍🏫 Thầy David</span>
-                        <Volume2 className="w-3 h-3" />
-                      </button>
-                    </div>
-                  </div>
-
-                  <p className="text-sm font-medium text-slate-700 bg-white p-3 rounded-xl border border-slate-200">
-                    {fillEx.sentenceWithBlank}
-                  </p>
-
-                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                    <input
-                      type="text"
-                      value={fillAnswers[fillEx.id] || ''}
-                      onChange={(e) =>
-                        !submitted &&
-                        setFillAnswers((prev) => ({ ...prev, [fillEx.id]: e.target.value }))
-                      }
-                      placeholder="Gõ từ cần điền..."
-                      disabled={submitted}
-                      className="px-4 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
-                    />
-                    <span className="text-xs text-slate-400 italic">Gợi ý: {fillEx.hint}</span>
-                  </div>
-
-                  {submitted && (
-                    <div className="p-3 rounded-xl bg-blue-50 text-blue-900 border border-blue-200 text-xs flex items-center justify-between">
-                      <div>
-                        Đáp án đúng: <strong className="text-blue-700 text-sm">{fillEx.correctWord}</strong>
-                      </div>
-                      <div className="flex items-center space-x-1">
-                        <button
-                          onClick={() => handleSpeakGranular(fillEx.correctWord, 'female')}
-                          className="px-2 py-1 rounded bg-white text-rose-700 border border-rose-200 font-bold text-[10px]"
-                          title="Cô Emily phát âm từ này"
-                        >
-                          👩‍🏫 {fillEx.correctWord}
-                        </button>
-                        <button
-                          onClick={() => handleSpeakGranular(fillEx.correctWord, 'male')}
-                          className="px-2 py-1 rounded bg-white text-blue-700 border border-blue-200 font-bold text-[10px]"
-                          title="Thầy David phát âm từ này"
-                        >
-                          👨‍🏫 {fillEx.correctWord}
-                        </button>
-                      </div>
                     </div>
                   )}
+
                 </div>
               );
-            })}
+            }
+          )}
+
         </div>
 
-        {/* Submit */}
-        <div className="pt-2 flex justify-end">
+        {/* ================================================================
+            FILL IN BLANK
+        ================================================================ */}
+
+        {listeningSection.fillInBlankExercises?.map(
+          (
+            exercise,
+            index
+          ) => (
+            <div
+              key={exercise.id}
+              className="p-5 rounded-2xl bg-slate-50 border border-slate-200 space-y-4"
+            >
+
+              <div className="flex items-center justify-between gap-3">
+
+                <p className="text-sm font-black text-slate-800">
+                  Điền từ thích hợp (
+                  {index + 1}
+                  )
+                </p>
+
+                <div className="flex gap-1">
+
+                  <button
+                    onClick={() =>
+                      handleSpeakText(
+                        exercise.sentenceWithBlank,
+                        'female'
+                      )
+                    }
+                    className="px-2 py-1 rounded-lg bg-rose-50 text-rose-700 border border-rose-200 text-[10px] font-bold"
+                  >
+                    👩‍🏫
+                  </button>
+
+                  <button
+                    onClick={() =>
+                      handleSpeakText(
+                        exercise.sentenceWithBlank,
+                        'male'
+                      )
+                    }
+                    className="px-2 py-1 rounded-lg bg-blue-50 text-blue-700 border border-blue-200 text-[10px] font-bold"
+                  >
+                    👨‍🏫
+                  </button>
+
+                </div>
+
+              </div>
+
+              <p className="p-4 bg-white rounded-xl border border-slate-200 text-sm font-medium">
+                {
+                  exercise.sentenceWithBlank
+                }
+              </p>
+
+              <div className="flex flex-col sm:flex-row gap-3">
+
+                <input
+                  type="text"
+                  value={
+                    fillAnswers[
+                      exercise.id
+                    ] || ''
+                  }
+                  disabled={submitted}
+                  onChange={(event) =>
+                    setFillAnswers(
+                      (
+                        previous
+                      ) => ({
+                        ...previous,
+                        [exercise.id]:
+                          event.target.value,
+                      })
+                    )
+                  }
+                  placeholder="Nhập từ cần điền..."
+                  className="flex-1 px-4 py-3 rounded-xl border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+
+                <span className="text-xs text-slate-500 self-center">
+                  Gợi ý: {exercise.hint}
+                </span>
+
+              </div>
+
+              {submitted && (
+                <div className="p-3 rounded-xl bg-blue-50 border border-blue-200 text-blue-800 text-xs flex items-center justify-between gap-3">
+
+                  <span>
+                    Đáp án đúng:{' '}
+                    <strong>
+                      {
+                        exercise.correctWord
+                      }
+                    </strong>
+                  </span>
+
+                  <div className="flex gap-1">
+
+                    <button
+                      onClick={() =>
+                        handleSpeakText(
+                          exercise.correctWord,
+                          'female'
+                        )
+                      }
+                      className="px-2 py-1 bg-white rounded border border-rose-200 text-rose-700"
+                    >
+                      👩‍🏫
+                    </button>
+
+                    <button
+                      onClick={() =>
+                        handleSpeakText(
+                          exercise.correctWord,
+                          'male'
+                        )
+                      }
+                      className="px-2 py-1 bg-white rounded border border-blue-200 text-blue-700"
+                    >
+                      👨‍🏫
+                    </button>
+
+                  </div>
+
+                </div>
+              )}
+
+            </div>
+          )
+        )}
+
+        {/* ================================================================
+            SUBMIT
+        ================================================================ */}
+
+        <div className="flex justify-end pt-2">
+
           {!submitted ? (
             <button
-              onClick={handleSubmitListening}
-              className="px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold text-sm rounded-xl shadow-md transition-all"
+              onClick={
+                handleSubmitListening
+              }
+              className="px-6 py-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-black text-sm"
             >
-              Nộp Bài Luyện Nghe
+              Nộp bài luyện nghe
             </button>
           ) : (
             <button
               onClick={() => {
-                setSubmitted(false);
-                setUserAnswers({});
-                setFillAnswers({});
+                setSubmitted(
+                  false
+                );
+
+                setUserAnswers(
+                  {}
+                );
+
+                setFillAnswers(
+                  {}
+                );
+
+                setScore(0);
               }}
-              className="px-6 py-3 bg-slate-800 hover:bg-slate-700 text-white font-bold text-sm rounded-xl transition-all"
+              className="px-6 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-black text-sm"
             >
-              Làm Lại Bài Nghe
+              Làm lại bài nghe
             </button>
           )}
+
         </div>
+
       </div>
     </div>
   );

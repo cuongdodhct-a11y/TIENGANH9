@@ -32,6 +32,15 @@ const CLIENT_CACHE_LIMIT = 100;
 
 const GEMINI_COOLDOWN_MS = 45_000;
 
+// Browser SpeechSynthesis is a fallback only. Some Chromium-based browsers
+// (including Cốc Cốc on macOS) can leave an utterance in speaking/pending
+// without producing audio. Never allow that state to block the audio engine.
+const BROWSER_SPEECH_TIMEOUT_MS = 30_000;
+// Safari/Chromium may legitimately need more than 6s for a 180-character
+// chunk. The timeout is calculated dynamically per utterance below.
+const BROWSER_SPEECH_VOICES_TIMEOUT_MS = 1_500;
+const BROWSER_SPEECH_CANCEL_DELAY_MS = 60;
+
 // ============================================================================
 // VOICE PREFERENCE
 // ============================================================================
@@ -292,9 +301,39 @@ export const unlockAudio = (): void => {
   }
 };
 
+// ============================================================================
+// BROWSER SPEECHSYNTHESIS INITIALIZATION
+// ============================================================================
+// IMPORTANT:
+// Do NOT call speechSynthesis.speak() here with a silent utterance.
+// Chromium/Cốc Cốc can keep that hidden utterance in a pending state and
+// interfere with the first real utterance. Initialization only warms up the
+// voice list; the real speech is started from the user's playback action.
+// ============================================================================
+
+export const unlockBrowserSpeech = (): void => {
+  if (
+    typeof window === 'undefined' ||
+    !('speechSynthesis' in window)
+  ) {
+    return;
+  }
+
+  try {
+    // Reading the voice list is safe and does not enqueue an utterance.
+    window.speechSynthesis.getVoices();
+  } catch (error) {
+    console.warn(
+      'Browser SpeechSynthesis initialization failed:',
+      error
+    );
+  }
+};
+
 if (typeof window !== 'undefined') {
   const unlocker = () => {
     unlockAudio();
+    unlockBrowserSpeech();
 
     window.removeEventListener(
       'pointerdown',
@@ -329,6 +368,7 @@ if (typeof window !== 'undefined') {
     unlocker
   );
 }
+
 
 // ============================================================================
 // GLOBAL PLAYBACK STATE
@@ -681,19 +721,83 @@ export const preloadSpeech =
 // BROWSER SPEECHSYNTHESIS FALLBACK
 // ============================================================================
 
-const getBrowserSpeechVoice = (
-  preferredVoice: VoiceProfile
-): SpeechSynthesisVoice | null => {
+const waitForBrowserVoices = async (): Promise<
+  SpeechSynthesisVoice[]
+> => {
   if (
     typeof window === 'undefined' ||
     !('speechSynthesis' in window)
   ) {
-    return null;
+    return [];
   }
 
-  const voices =
-    window.speechSynthesis.getVoices();
+  const synth = window.speechSynthesis;
+  const initial = synth.getVoices();
 
+  if (initial.length) {
+    return initial;
+  }
+
+  return await new Promise<SpeechSynthesisVoice[]>(
+    (resolve) => {
+      let settled = false;
+
+      const finish = (
+        voices: SpeechSynthesisVoice[]
+      ) => {
+        if (settled) return;
+        settled = true;
+
+        window.clearTimeout(timer);
+
+        try {
+          synth.removeEventListener(
+            'voiceschanged',
+            onVoicesChanged
+          );
+        } catch {
+          // Ignore.
+        }
+
+        resolve(voices);
+      };
+
+      const onVoicesChanged = () => {
+        const voices = synth.getVoices();
+
+        if (voices.length) {
+          finish(voices);
+        }
+      };
+
+      const timer = window.setTimeout(
+        () => finish(synth.getVoices()),
+        BROWSER_SPEECH_VOICES_TIMEOUT_MS
+      );
+
+      try {
+        synth.addEventListener(
+          'voiceschanged',
+          onVoicesChanged
+        );
+      } catch {
+        // Some older implementations may not expose addEventListener.
+      }
+
+      // Trigger the browser's voice discovery once more.
+      try {
+        synth.getVoices();
+      } catch {
+        finish([]);
+      }
+    }
+  );
+};
+
+const getBrowserSpeechVoice = (
+  voices: SpeechSynthesisVoice[],
+  preferredVoice: VoiceProfile
+): SpeechSynthesisVoice | null => {
   if (!voices.length) {
     return null;
   }
@@ -720,12 +824,11 @@ const getBrowserSpeechVoice = (
     'allison',
     'susan',
     'zira',
-    'hazel',
     'siri',
-    'google us english',
-    'google uk english female',
     'aria',
     'jenny',
+    'google us english',
+    'google uk english female',
   ];
 
   const maleNames = [
@@ -735,11 +838,11 @@ const getBrowserSpeechVoice = (
     'david',
     'fred',
     'tom',
-    'google uk english male',
-    'google us english male',
     'guy',
     'ryan',
     'george',
+    'google uk english male',
+    'google us english male',
   ];
 
   const preferredNames =
@@ -776,8 +879,23 @@ const getBrowserSpeechVoice = (
       }
     );
 
+    // IMPORTANT:
+    // Prefer locally installed voices over remote Google voices.
+    // On Cốc Cốc/Chromium, a remote "Google US English" voice can report
+    // speaking=true/pending=true while producing no audio.
     if (voice.localService) {
-      score += 5;
+      score += 60;
+    } else {
+      score -= 20;
+    }
+
+    // Remote Google voices are particularly unreliable in some Chromium-based
+    // browsers. Prefer any installed local English voice over them.
+    if (
+      !voice.localService &&
+      /google/i.test(name)
+    ) {
+      score -= 60;
     }
 
     return score;
@@ -797,127 +915,273 @@ const getBrowserSpeechVoice = (
   );
 };
 
-const speakWithBrowserFallback = (
+const getBrowserSpeechTimeout = (
+  text: string,
+  rate: number
+): number => {
+  // Approximate English speech duration from character count.
+  // Keep a generous safety margin because Safari can start slowly.
+  const charsPerSecond = 12 * Math.max(0.75, Math.min(rate, 1.08));
+  const estimatedMs =
+    (text.length / charsPerSecond) * 1000;
+
+  return Math.max(
+    12_000,
+    Math.min(
+      BROWSER_SPEECH_TIMEOUT_MS,
+      Math.ceil(estimatedMs + 10_000)
+    )
+  );
+};
+
+const speakWithBrowserFallback = async (
   text: string,
   preferredVoice: VoiceProfile,
   rate: number,
   session: number
-): Promise<boolean> =>
-  new Promise(
-    (resolve) => {
-      if (
-        typeof window === 'undefined' ||
-        !('speechSynthesis' in window) ||
-        typeof SpeechSynthesisUtterance === 'undefined'
-      ) {
-        console.error(
-          'SpeechSynthesis is not available in this browser.'
-        );
-        resolve(false);
-        return;
+): Promise<boolean> => {
+  if (
+    typeof window === 'undefined' ||
+    !('speechSynthesis' in window) ||
+    typeof SpeechSynthesisUtterance === 'undefined'
+  ) {
+    console.error(
+      'SpeechSynthesis is not available in this browser.'
+    );
+    return false;
+  }
+
+  if (session !== playbackSession) {
+    return false;
+  }
+
+  const synth = window.speechSynthesis;
+
+  // Do not use the old silent "unlock" utterance. It can remain pending.
+  const voices = await waitForBrowserVoices();
+
+  if (session !== playbackSession) {
+    return false;
+  }
+
+  const selectedVoice =
+    getBrowserSpeechVoice(
+      voices,
+      preferredVoice
+    );
+
+  if (!selectedVoice && !voices.length) {
+    console.warn(
+      'No browser speech voices are available.'
+    );
+  }
+
+  const utterance =
+    new SpeechSynthesisUtterance(
+      text
+    );
+
+  utterance.lang =
+    selectedVoice?.lang ||
+    'en-US';
+
+  if (selectedVoice) {
+    utterance.voice =
+      selectedVoice;
+  }
+
+  utterance.rate =
+    Math.max(
+      0.75,
+      Math.min(
+        rate,
+        1.08
+      )
+    );
+
+  utterance.pitch = 1;
+  utterance.volume = 1;
+
+  let settled = false;
+  let timeoutId: number | null = null;
+  let resumeTimerId: number | null = null;
+
+  const finish = (
+    success: boolean
+  ) => {
+    if (settled) return;
+
+    settled = true;
+
+    if (timeoutId !== null) {
+      window.clearTimeout(
+        timeoutId
+      );
+      timeoutId = null;
+    }
+
+    if (resumeTimerId !== null) {
+      window.clearInterval(
+        resumeTimerId
+      );
+      resumeTimerId = null;
+    }
+
+    browserSpeechActive = false;
+
+    utterance.onstart = null;
+    utterance.onend = null;
+    utterance.onerror = null;
+
+    resolvePromise(success);
+  };
+
+  let resolvePromise:
+    (value: boolean) => void;
+
+  const resultPromise =
+    new Promise<boolean>(
+      (resolve) => {
+        resolvePromise = resolve;
       }
+    );
 
-      if (
-        session !== playbackSession
-      ) {
-        resolve(false);
-        return;
+  utterance.onstart = () => {
+    if (session !== playbackSession) {
+      try {
+        synth.cancel();
+      } catch {
+        // Ignore.
       }
+      finish(false);
+      return;
+    }
 
-      const synth =
-        window.speechSynthesis;
+    browserSpeechActive = true;
+  };
 
-      const selectedVoice =
-        getBrowserSpeechVoice(
-          preferredVoice
-        );
+  utterance.onend = () => {
+    finish(
+      session === playbackSession
+    );
+  };
 
-      const utterance =
-        new SpeechSynthesisUtterance(
-          text
-        );
+  utterance.onerror = (
+    event
+  ) => {
+    const errorName =
+      event?.error || '';
 
-      utterance.lang =
-        selectedVoice?.lang ||
-        'en-US';
+    // A cancellation is a success only when the current session is still
+    // active and the browser itself reports a normal completion elsewhere.
+    // For an interrupted/canceled utterance, fail safely.
+    console.warn(
+      'Browser SpeechSynthesis error:',
+      errorName
+    );
 
-      if (selectedVoice) {
-        utterance.voice =
-          selectedVoice;
-      }
+    finish(false);
+  };
 
-      utterance.rate =
-        Math.max(
-          0.75,
-          Math.min(
-            rate,
-            1.08
-          )
-        );
+  // Critical safety net:
+  // Cốc Cốc may never fire onend/onerror and may remain speaking/pending.
+  // IMPORTANT: the timeout must be long enough for a real 180-character
+  // utterance; a fixed 6-second timeout can cancel valid speech mid-sentence.
+  const speechTimeoutMs =
+    getBrowserSpeechTimeout(
+      text,
+      rate
+    );
 
-      utterance.pitch = 1;
-      utterance.volume = 1;
+  timeoutId = window.setTimeout(
+    () => {
+      if (settled) return;
 
-      let settled = false;
-
-      const finish = (
-        success: boolean
-      ) => {
-        if (settled) return;
-
-        settled = true;
-        browserSpeechActive = false;
-
-        utterance.onend = null;
-        utterance.onerror = null;
-
-        resolve(success);
-      };
-
-      utterance.onend = () =>
-        finish(true);
-
-      utterance.onerror = (
-        event
-      ) => {
-        const errorName =
-          event?.error || '';
-
-        finish(
-          errorName === 'canceled' ||
-          errorName === 'interrupted'
-            ? session !== playbackSession
-            : false
-        );
-      };
-
-      if (
-        session !== playbackSession
-      ) {
-        resolve(false);
-        return;
-      }
+      console.warn(
+        `Browser SpeechSynthesis timeout after ${speechTimeoutMs}ms. ` +
+        'Stopping stuck utterance.'
+      );
 
       try {
-        browserSpeechActive = true;
-
-        // Remove any stale queued browser utterance before
-        // speaking the current chunk.
         synth.cancel();
-
-        synth.speak(
-          utterance
-        );
-      } catch (error) {
-        console.warn(
-          'SpeechSynthesis fallback failed:',
-          error
-        );
-
-        finish(false);
+      } catch {
+        // Ignore.
       }
-    }
+
+      finish(false);
+    },
+    speechTimeoutMs
   );
+
+  if (session !== playbackSession) {
+    finish(false);
+    return await resultPromise;
+  }
+
+  try {
+    // Clear stale browser speech before starting the real utterance.
+    // Wait briefly after cancel because Chromium-based browsers sometimes
+    // need one event-loop turn before accepting a new utterance.
+    synth.cancel();
+
+    await new Promise<void>(
+      (resolve) =>
+        window.setTimeout(
+          resolve,
+          BROWSER_SPEECH_CANCEL_DELAY_MS
+        )
+    );
+
+    if (session !== playbackSession) {
+      finish(false);
+      return await resultPromise;
+    }
+
+    browserSpeechActive = true;
+
+    synth.speak(
+      utterance
+    );
+
+    // Safari can occasionally enter a paused state during long utterances.
+    // Keep the current utterance moving without cancelling the queue.
+    resumeTimerId = window.setInterval(
+      () => {
+        if (
+          settled ||
+          session !== playbackSession
+        ) {
+          return;
+        }
+
+        try {
+          if (
+            synth.paused &&
+            synth.speaking
+          ) {
+            synth.resume();
+          }
+        } catch {
+          // Ignore browser-specific resume errors.
+        }
+      },
+      1_000
+    );
+
+    // Some browsers do not fire onstart immediately. If the browser accepts
+    // the utterance, speaking/pending is allowed to settle normally; the
+    // timeout above protects against a permanent stall.
+  } catch (error) {
+    console.warn(
+      'SpeechSynthesis fallback failed:',
+      error
+    );
+
+    finish(false);
+  }
+
+  return await resultPromise;
+};
 
 // ============================================================================
 // PLAY ONE CHUNK
