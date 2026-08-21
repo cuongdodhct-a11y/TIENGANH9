@@ -815,6 +815,10 @@ const getBrowserSpeechVoice = (
       ? englishVoices
       : voices;
 
+  // Browser voice names are NOT standardized and browsers do not expose
+  // a gender property. Therefore we use conservative name heuristics.
+  // Never treat the generic "Google US English" voice as male: on several
+  // Chromium/Android installations it is a female/default voice.
   const femaleNames = [
     'female',
     'samantha',
@@ -827,8 +831,14 @@ const getBrowserSpeechVoice = (
     'siri',
     'aria',
     'jenny',
-    'google us english',
+    'hazel',
+    'heera',
+    'moira',
     'google uk english female',
+    'google us english female',
+    'microsoft zira',
+    'microsoft aria',
+    'microsoft jenny',
   ];
 
   const maleNames = [
@@ -841,14 +851,28 @@ const getBrowserSpeechVoice = (
     'guy',
     'ryan',
     'george',
+    'mark',
+    'matthew',
+    'aaron',
+    'arthur',
+    'rishi',
     'google uk english male',
     'google us english male',
+    'microsoft david',
+    'microsoft mark',
+    'microsoft guy',
+    'microsoft ryan',
   ];
 
   const preferredNames =
     preferredVoice === 'female'
       ? femaleNames
       : maleNames;
+
+  const oppositeNames =
+    preferredVoice === 'female'
+      ? maleNames
+      : femaleNames;
 
   const scoreVoice = (
     voice: SpeechSynthesisVoice
@@ -874,23 +898,37 @@ const getBrowserSpeechVoice = (
     preferredNames.forEach(
       (keyword, index) => {
         if (name.includes(keyword)) {
-          score += 100 - index;
+          score += 180 - index;
         }
       }
     );
 
-    // IMPORTANT:
-    // Prefer locally installed voices over remote Google voices.
-    // On Cốc Cốc/Chromium, a remote "Google US English" voice can report
-    // speaking=true/pending=true while producing no audio.
+    // Strongly reject a voice whose name explicitly indicates the opposite
+    // profile. This prevents a female voice from being selected for David.
+    oppositeNames.forEach(
+      (keyword, index) => {
+        if (name.includes(keyword)) {
+          score -= 220 - index;
+        }
+      }
+    );
+
+    // The generic Google voices are ambiguous. They are acceptable for Emily,
+    // but NEVER count as evidence that a voice is male.
+    if (
+      preferredVoice === 'male' &&
+      /google us english(?! male)|google uk english(?! male)/i.test(name)
+    ) {
+      score -= 180;
+    }
+
+    // Prefer local voices because remote Chromium voices can get stuck.
     if (voice.localService) {
       score += 60;
     } else {
       score -= 20;
     }
 
-    // Remote Google voices are particularly unreliable in some Chromium-based
-    // browsers. Prefer any installed local English voice over them.
     if (
       !voice.localService &&
       /google/i.test(name)
@@ -901,18 +939,29 @@ const getBrowserSpeechVoice = (
     return score;
   };
 
-  return candidates.reduce(
-    (
-      best,
-      voice
-    ) =>
-      !best ||
-      scoreVoice(voice) >
-        scoreVoice(best)
-        ? voice
-        : best,
-    null as SpeechSynthesisVoice | null
-  );
+  const scored = candidates
+    .map((voice) => ({
+      voice,
+      score: scoreVoice(voice),
+      name: (voice.name || '').toLowerCase(),
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  // For male speech, only accept a voice that actually looks male by name.
+  // If the device has no identifiable male voice, return null so the caller
+  // can use the male pitch fallback instead of silently choosing a female
+  // default voice.
+  if (preferredVoice === 'male') {
+    const maleMatch = scored.find(({ name }) =>
+      maleNames.some((keyword) =>
+        name.includes(keyword)
+      )
+    );
+
+    return maleMatch?.voice || null;
+  }
+
+  return scored[0]?.voice || null;
 };
 
 const getBrowserSpeechTimeout = (
@@ -999,7 +1048,10 @@ const speakWithBrowserFallback = async (
       )
     );
 
-  utterance.pitch = 1;
+  // SpeechSynthesisVoice has no gender field. When a device lacks a named
+  // male voice (common on some Android/Chromium setups), lower pitch gives
+  // David a stable male fallback instead of silently using the default female voice.
+  utterance.pitch = preferredVoice === 'male' ? 0.72 : 1.0;
   utterance.volume = 1;
 
   let settled = false;
