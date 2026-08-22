@@ -412,7 +412,7 @@ CẤU TRÚC JSON BẮT BUỘC:
     const ai = getAI();
 
     /*
-     * Gemini 2.5 Flash is used deliberately:
+     * Gemini 3.6 Flash is used deliberately:
      *
      * - It supports audio input.
      * - It is available on the Gemini API Free Tier.
@@ -423,7 +423,7 @@ CẤU TRÚC JSON BẮT BUỘC:
 
     const response =
       await ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-3.6-flash",
 
         contents: [
           {
@@ -443,7 +443,6 @@ CẤU TRÚC JSON BẮT BUỘC:
         ],
 
         config: {
-          temperature: 0.15,
           maxOutputTokens: 4096,
 
           responseMimeType:
