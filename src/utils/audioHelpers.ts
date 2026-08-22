@@ -10,7 +10,7 @@
 // 5. Một thời điểm chỉ có MỘT audio.
 // 6. Bấm nút mới sẽ dừng audio cũ.
 // 7. Cache audio đã tải.
-// 8. Gemini TTS lỗi/quota -> tự động fallback SpeechSynthesis.
+// 8. Gemini TTS lỗi/quota -> báo lỗi có kiểm soát; KHÔNG fallback SpeechSynthesis cho giọng giáo viên.
 // 9. Hỗ trợ đọc hội thoại tuần tự theo vai.
 // 10. Hạn chế gọi Gemini lặp lại khi gặp 429.
 // ============================================================================
@@ -32,15 +32,6 @@ const CLIENT_CACHE_LIMIT = 100;
 
 const GEMINI_COOLDOWN_MS = 45_000;
 
-// Browser SpeechSynthesis is a fallback only. Some Chromium-based browsers
-// (including Cốc Cốc on macOS) can leave an utterance in speaking/pending
-// without producing audio. Never allow that state to block the audio engine.
-const BROWSER_SPEECH_TIMEOUT_MS = 30_000;
-// Safari/Chromium may legitimately need more than 6s for a 180-character
-// chunk. The timeout is calculated dynamically per utterance below.
-const BROWSER_SPEECH_VOICES_TIMEOUT_MS = 1_500;
-const BROWSER_SPEECH_CANCEL_DELAY_MS = 60;
-
 // ============================================================================
 // VOICE PREFERENCE
 // ============================================================================
@@ -48,7 +39,10 @@ const BROWSER_SPEECH_CANCEL_DELAY_MS = 60;
 let currentPreferredVoice: VoiceProfile =
   'female';
 
-let geminiUnavailableUntil = 0;
+const geminiUnavailableUntil: Record<VoiceProfile, number> = {
+  female: 0,
+  male: 0,
+};
 
 if (typeof window !== 'undefined') {
   try {
@@ -301,39 +295,9 @@ export const unlockAudio = (): void => {
   }
 };
 
-// ============================================================================
-// BROWSER SPEECHSYNTHESIS INITIALIZATION
-// ============================================================================
-// IMPORTANT:
-// Do NOT call speechSynthesis.speak() here with a silent utterance.
-// Chromium/Cốc Cốc can keep that hidden utterance in a pending state and
-// interfere with the first real utterance. Initialization only warms up the
-// voice list; the real speech is started from the user's playback action.
-// ============================================================================
-
-export const unlockBrowserSpeech = (): void => {
-  if (
-    typeof window === 'undefined' ||
-    !('speechSynthesis' in window)
-  ) {
-    return;
-  }
-
-  try {
-    // Reading the voice list is safe and does not enqueue an utterance.
-    window.speechSynthesis.getVoices();
-  } catch (error) {
-    console.warn(
-      'Browser SpeechSynthesis initialization failed:',
-      error
-    );
-  }
-};
-
 if (typeof window !== 'undefined') {
   const unlocker = () => {
     unlockAudio();
-    unlockBrowserSpeech();
 
     window.removeEventListener(
       'pointerdown',
@@ -369,6 +333,16 @@ if (typeof window !== 'undefined') {
   );
 }
 
+/**
+ * Backward-compatible no-op.
+ *
+ * Teacher voices are Gemini-only now. Older components still import this
+ * symbol to unlock browser audio after a user gesture; keeping the export
+ * avoids a build break without re-enabling browser SpeechSynthesis.
+ */
+export const unlockBrowserSpeech = (): void => {
+  // Intentionally empty. Gemini audio is played through HTMLAudioElement.
+};
 
 // ============================================================================
 // GLOBAL PLAYBACK STATE
@@ -524,6 +498,13 @@ export const isSpeakingActive =
   (): boolean =>
     audioCurrentlyPlaying;
 
+/**
+ * Teacher voices are intentionally Gemini-only. This flag is informational
+ * and does not select or synthesize a browser voice.
+ */
+export const isTeacherVoiceEngineAvailable = (voice: VoiceProfile = currentPreferredVoice): boolean =>
+  Date.now() >= geminiUnavailableUntil[voice];
+
 // ============================================================================
 // FETCH / CACHE ONE AUDIO
 // ============================================================================
@@ -561,11 +542,11 @@ const loadAudioUrl = async (
   const promise =
     (async () => {
       try {
-        // When Gemini has already failed recently, do NOT keep
-        // hitting the endpoint. The caller will use SpeechSynthesis.
+        // When Gemini has already failed recently, do not keep hitting the endpoint.
+        // The caller will fail closed rather than changing the teacher voice.
         if (
           Date.now() <
-          geminiUnavailableUntil
+          geminiUnavailableUntil[voice]
         ) {
           return null;
         }
@@ -582,41 +563,23 @@ const loadAudioUrl = async (
             }
           );
 
-        const fallbackHeader =
-          response.headers.get(
-            'X-TTS-Browser-Fallback'
-          );
-
-        const fallbackRequested =
-          fallbackHeader === 'true';
-
-        if (
-          response.status === 429 ||
-          response.status === 400 ||
-          response.status === 502 ||
-          fallbackRequested
-        ) {
-          geminiUnavailableUntil =
+        if (!response.ok) {
+          geminiUnavailableUntil[voice] =
             Date.now() +
             GEMINI_COOLDOWN_MS;
+
+          let serverMessage = '';
+          try {
+            const body = await response.clone().json();
+            serverMessage = String(body?.error || '');
+          } catch {
+            // Response may not be JSON.
+          }
 
           console.warn(
             `Gemini TTS unavailable (${response.status}). ` +
-            'Using browser SpeechSynthesis fallback.'
+            (serverMessage || 'Teacher voice audio is unavailable.')
           );
-
-          return null;
-        }
-
-        if (!response.ok) {
-          console.warn(
-            'TTS request failed:',
-            response.status
-          );
-
-          geminiUnavailableUntil =
-            Date.now() +
-            GEMINI_COOLDOWN_MS;
 
           return null;
         }
@@ -627,10 +590,10 @@ const loadAudioUrl = async (
         if (!blob.size) {
           console.warn(
             'Gemini TTS returned an empty audio response. ' +
-            'Using browser SpeechSynthesis fallback.'
+            'Teacher voice audio is unavailable.'
           );
 
-          geminiUnavailableUntil =
+          geminiUnavailableUntil[voice] =
             Date.now() +
             GEMINI_COOLDOWN_MS;
 
@@ -650,11 +613,11 @@ const loadAudioUrl = async (
         return url;
       } catch (error) {
         console.warn(
-          'TTS network error. Using browser SpeechSynthesis fallback:',
+          'TTS network error. Teacher voice audio is unavailable:',
           error
         );
 
-        geminiUnavailableUntil =
+        geminiUnavailableUntil[voice] =
           Date.now() +
           GEMINI_COOLDOWN_MS;
 
@@ -718,522 +681,11 @@ export const preloadSpeech =
   };
 
 // ============================================================================
-// BROWSER SPEECHSYNTHESIS FALLBACK
+// GEMINI TEACHER TTS ONLY
 // ============================================================================
-
-const waitForBrowserVoices = async (): Promise<
-  SpeechSynthesisVoice[]
-> => {
-  if (
-    typeof window === 'undefined' ||
-    !('speechSynthesis' in window)
-  ) {
-    return [];
-  }
-
-  const synth = window.speechSynthesis;
-  const initial = synth.getVoices();
-
-  if (initial.length) {
-    return initial;
-  }
-
-  return await new Promise<SpeechSynthesisVoice[]>(
-    (resolve) => {
-      let settled = false;
-
-      const finish = (
-        voices: SpeechSynthesisVoice[]
-      ) => {
-        if (settled) return;
-        settled = true;
-
-        window.clearTimeout(timer);
-
-        try {
-          synth.removeEventListener(
-            'voiceschanged',
-            onVoicesChanged
-          );
-        } catch {
-          // Ignore.
-        }
-
-        resolve(voices);
-      };
-
-      const onVoicesChanged = () => {
-        const voices = synth.getVoices();
-
-        if (voices.length) {
-          finish(voices);
-        }
-      };
-
-      const timer = window.setTimeout(
-        () => finish(synth.getVoices()),
-        BROWSER_SPEECH_VOICES_TIMEOUT_MS
-      );
-
-      try {
-        synth.addEventListener(
-          'voiceschanged',
-          onVoicesChanged
-        );
-      } catch {
-        // Some older implementations may not expose addEventListener.
-      }
-
-      // Trigger the browser's voice discovery once more.
-      try {
-        synth.getVoices();
-      } catch {
-        finish([]);
-      }
-    }
-  );
-};
-
-const getBrowserSpeechVoice = (
-  voices: SpeechSynthesisVoice[],
-  preferredVoice: VoiceProfile
-): SpeechSynthesisVoice | null => {
-  if (!voices.length) {
-    return null;
-  }
-
-  const englishVoices =
-    voices.filter(
-      (voice) =>
-        /^en(?:[-_]|$)/i.test(
-          voice.lang || ''
-        )
-    );
-
-  const candidates =
-    englishVoices.length
-      ? englishVoices
-      : voices;
-
-  // Browser voice names are NOT standardized and browsers do not expose
-  // a gender property. Therefore we use conservative name heuristics.
-  // Never treat the generic "Google US English" voice as male: on several
-  // Chromium/Android installations it is a female/default voice.
-  const femaleNames = [
-    'female',
-    'samantha',
-    'karen',
-    'victoria',
-    'ava',
-    'allison',
-    'susan',
-    'zira',
-    'siri',
-    'aria',
-    'jenny',
-    'hazel',
-    'heera',
-    'moira',
-    'google uk english female',
-    'google us english female',
-    'microsoft zira',
-    'microsoft aria',
-    'microsoft jenny',
-  ];
-
-  const maleNames = [
-    'male',
-    'daniel',
-    'alex',
-    'david',
-    'fred',
-    'tom',
-    'guy',
-    'ryan',
-    'george',
-    'mark',
-    'matthew',
-    'aaron',
-    'arthur',
-    'rishi',
-    'google uk english male',
-    'google us english male',
-    'microsoft david',
-    'microsoft mark',
-    'microsoft guy',
-    'microsoft ryan',
-  ];
-
-  const preferredNames =
-    preferredVoice === 'female'
-      ? femaleNames
-      : maleNames;
-
-  const oppositeNames =
-    preferredVoice === 'female'
-      ? maleNames
-      : femaleNames;
-
-  const scoreVoice = (
-    voice: SpeechSynthesisVoice
-  ): number => {
-    const name =
-      (voice.name || '').toLowerCase();
-
-    const lang =
-      (voice.lang || '').toLowerCase();
-
-    let score = 0;
-
-    if (lang === 'en-us') {
-      score += 30;
-    } else if (lang.startsWith('en-us')) {
-      score += 25;
-    } else if (lang === 'en-gb') {
-      score += 20;
-    } else if (lang.startsWith('en-')) {
-      score += 10;
-    }
-
-    preferredNames.forEach(
-      (keyword, index) => {
-        if (name.includes(keyword)) {
-          score += 180 - index;
-        }
-      }
-    );
-
-    // Strongly reject a voice whose name explicitly indicates the opposite
-    // profile. This prevents a female voice from being selected for David.
-    oppositeNames.forEach(
-      (keyword, index) => {
-        if (name.includes(keyword)) {
-          score -= 220 - index;
-        }
-      }
-    );
-
-    // The generic Google voices are ambiguous. They are acceptable for Emily,
-    // but NEVER count as evidence that a voice is male.
-    if (
-      preferredVoice === 'male' &&
-      /google us english(?! male)|google uk english(?! male)/i.test(name)
-    ) {
-      score -= 180;
-    }
-
-    // Prefer local voices because remote Chromium voices can get stuck.
-    if (voice.localService) {
-      score += 60;
-    } else {
-      score -= 20;
-    }
-
-    if (
-      !voice.localService &&
-      /google/i.test(name)
-    ) {
-      score -= 60;
-    }
-
-    return score;
-  };
-
-  const scored = candidates
-    .map((voice) => ({
-      voice,
-      score: scoreVoice(voice),
-      name: (voice.name || '').toLowerCase(),
-    }))
-    .sort((a, b) => b.score - a.score);
-
-  // For male speech, only accept a voice that actually looks male by name.
-  // If the device has no identifiable male voice, return null so the caller
-  // can use the male pitch fallback instead of silently choosing a female
-  // default voice.
-  if (preferredVoice === 'male') {
-    const maleMatch = scored.find(({ name }) =>
-      maleNames.some((keyword) =>
-        name.includes(keyword)
-      )
-    );
-
-    return maleMatch?.voice || null;
-  }
-
-  return scored[0]?.voice || null;
-};
-
-const getBrowserSpeechTimeout = (
-  text: string,
-  rate: number
-): number => {
-  // Approximate English speech duration from character count.
-  // Keep a generous safety margin because Safari can start slowly.
-  const charsPerSecond = 12 * Math.max(0.75, Math.min(rate, 1.08));
-  const estimatedMs =
-    (text.length / charsPerSecond) * 1000;
-
-  return Math.max(
-    12_000,
-    Math.min(
-      BROWSER_SPEECH_TIMEOUT_MS,
-      Math.ceil(estimatedMs + 10_000)
-    )
-  );
-};
-
-const speakWithBrowserFallback = async (
-  text: string,
-  preferredVoice: VoiceProfile,
-  rate: number,
-  session: number
-): Promise<boolean> => {
-  if (
-    typeof window === 'undefined' ||
-    !('speechSynthesis' in window) ||
-    typeof SpeechSynthesisUtterance === 'undefined'
-  ) {
-    console.error(
-      'SpeechSynthesis is not available in this browser.'
-    );
-    return false;
-  }
-
-  if (session !== playbackSession) {
-    return false;
-  }
-
-  const synth = window.speechSynthesis;
-
-  // Do not use the old silent "unlock" utterance. It can remain pending.
-  const voices = await waitForBrowserVoices();
-
-  if (session !== playbackSession) {
-    return false;
-  }
-
-  const selectedVoice =
-    getBrowserSpeechVoice(
-      voices,
-      preferredVoice
-    );
-
-  if (!selectedVoice && !voices.length) {
-    console.warn(
-      'No browser speech voices are available.'
-    );
-  }
-
-  const utterance =
-    new SpeechSynthesisUtterance(
-      text
-    );
-
-  utterance.lang =
-    selectedVoice?.lang ||
-    'en-US';
-
-  if (selectedVoice) {
-    utterance.voice =
-      selectedVoice;
-  }
-
-  utterance.rate =
-    Math.max(
-      0.75,
-      Math.min(
-        rate,
-        1.08
-      )
-    );
-
-  // SpeechSynthesisVoice has no gender field. When a device lacks a named
-  // male voice (common on some Android/Chromium setups), lower pitch gives
-  // David a stable male fallback instead of silently using the default female voice.
-  utterance.pitch = preferredVoice === 'male' ? 0.72 : 1.0;
-  utterance.volume = 1;
-
-  let settled = false;
-  let timeoutId: number | null = null;
-  let resumeTimerId: number | null = null;
-
-  const finish = (
-    success: boolean
-  ) => {
-    if (settled) return;
-
-    settled = true;
-
-    if (timeoutId !== null) {
-      window.clearTimeout(
-        timeoutId
-      );
-      timeoutId = null;
-    }
-
-    if (resumeTimerId !== null) {
-      window.clearInterval(
-        resumeTimerId
-      );
-      resumeTimerId = null;
-    }
-
-    browserSpeechActive = false;
-
-    utterance.onstart = null;
-    utterance.onend = null;
-    utterance.onerror = null;
-
-    resolvePromise(success);
-  };
-
-  let resolvePromise:
-    (value: boolean) => void;
-
-  const resultPromise =
-    new Promise<boolean>(
-      (resolve) => {
-        resolvePromise = resolve;
-      }
-    );
-
-  utterance.onstart = () => {
-    if (session !== playbackSession) {
-      try {
-        synth.cancel();
-      } catch {
-        // Ignore.
-      }
-      finish(false);
-      return;
-    }
-
-    browserSpeechActive = true;
-  };
-
-  utterance.onend = () => {
-    finish(
-      session === playbackSession
-    );
-  };
-
-  utterance.onerror = (
-    event
-  ) => {
-    const errorName =
-      event?.error || '';
-
-    // A cancellation is a success only when the current session is still
-    // active and the browser itself reports a normal completion elsewhere.
-    // For an interrupted/canceled utterance, fail safely.
-    console.warn(
-      'Browser SpeechSynthesis error:',
-      errorName
-    );
-
-    finish(false);
-  };
-
-  // Critical safety net:
-  // Cốc Cốc may never fire onend/onerror and may remain speaking/pending.
-  // IMPORTANT: the timeout must be long enough for a real 180-character
-  // utterance; a fixed 6-second timeout can cancel valid speech mid-sentence.
-  const speechTimeoutMs =
-    getBrowserSpeechTimeout(
-      text,
-      rate
-    );
-
-  timeoutId = window.setTimeout(
-    () => {
-      if (settled) return;
-
-      console.warn(
-        `Browser SpeechSynthesis timeout after ${speechTimeoutMs}ms. ` +
-        'Stopping stuck utterance.'
-      );
-
-      try {
-        synth.cancel();
-      } catch {
-        // Ignore.
-      }
-
-      finish(false);
-    },
-    speechTimeoutMs
-  );
-
-  if (session !== playbackSession) {
-    finish(false);
-    return await resultPromise;
-  }
-
-  try {
-    // Clear stale browser speech before starting the real utterance.
-    // Wait briefly after cancel because Chromium-based browsers sometimes
-    // need one event-loop turn before accepting a new utterance.
-    synth.cancel();
-
-    await new Promise<void>(
-      (resolve) =>
-        window.setTimeout(
-          resolve,
-          BROWSER_SPEECH_CANCEL_DELAY_MS
-        )
-    );
-
-    if (session !== playbackSession) {
-      finish(false);
-      return await resultPromise;
-    }
-
-    browserSpeechActive = true;
-
-    synth.speak(
-      utterance
-    );
-
-    // Safari can occasionally enter a paused state during long utterances.
-    // Keep the current utterance moving without cancelling the queue.
-    resumeTimerId = window.setInterval(
-      () => {
-        if (
-          settled ||
-          session !== playbackSession
-        ) {
-          return;
-        }
-
-        try {
-          if (
-            synth.paused &&
-            synth.speaking
-          ) {
-            synth.resume();
-          }
-        } catch {
-          // Ignore browser-specific resume errors.
-        }
-      },
-      1_000
-    );
-
-    // Some browsers do not fire onstart immediately. If the browser accepts
-    // the utterance, speaking/pending is allowed to settle normally; the
-    // timeout above protects against a permanent stall.
-  } catch (error) {
-    console.warn(
-      'SpeechSynthesis fallback failed:',
-      error
-    );
-
-    finish(false);
-  }
-
-  return await resultPromise;
-};
+// Do not use SpeechSynthesis for teacher voices. Browser engines cannot
+// guarantee the requested speaker identity (Emily/David).
+// ============================================================================
 
 // ============================================================================
 // PLAY ONE CHUNK
@@ -1269,27 +721,14 @@ const playOneChunk = (
           voice
         );
 
-      // Gemini TTS failed / quota exhausted / invalid request /
-      // server/network failure -> use browser SpeechSynthesis.
+      // Teacher voices are Gemini-only. Never fall back to the browser
+      // SpeechSynthesis engine because it cannot guarantee the requested
+      // male/female identity. A failed Gemini request must fail closed.
       if (!url) {
-        if (
-          session !== playbackSession
-        ) {
-          resolve(false);
-          return;
-        }
-
-        const fallbackResult =
-          await speakWithBrowserFallback(
-            cleanText,
-            voice,
-            rate,
-            session
-          );
-
-        resolve(
-          fallbackResult
+        console.warn(
+          `Teacher TTS unavailable for ${voice} voice; refusing browser fallback.`
         );
+        resolve(false);
         return;
       }
 
