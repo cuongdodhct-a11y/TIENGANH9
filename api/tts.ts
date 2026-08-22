@@ -3,17 +3,19 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 /**
  * TIENGANH9 - Production TTS
  *
- * Cô Emily  -> female -> Kore
- * Thầy David -> male   -> Charon
+ * Cô Emily  -> female -> Gemini Kore
+ * Thầy David -> male -> Gemini Charon
  *
- * Kiến trúc:
  * Browser
  *    ↓
- * /api/tts
+ * /api/tts?text=Hello&voice=female
+ * /api/tts?text=Hello&voice=male
  *    ↓
- * Gemini 3.1 Flash TTS
+ * Gemini Interactions API
  *    ↓
- * PCM 24kHz / mono / 16-bit
+ * gemini-3.1-flash-tts-preview
+ *    ↓
+ * PCM 24 kHz / mono / 16-bit
  *    ↓
  * WAV
  *
@@ -24,12 +26,25 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
  * - Android Chrome
  * - Windows Chrome
  *
- * Không dùng SpeechSynthesis làm TTS chính.
+ * KHÔNG dùng SpeechSynthesis làm TTS chính.
  */
+
+/* ============================================================
+   CONFIGURATION
+   ============================================================ */
 
 const TTS_MODEL = "gemini-3.1-flash-tts-preview";
 
+const TTS_INTERACTIONS_URL =
+  "https://generativelanguage.googleapis.com/v1beta/interactions";
+
+const TTS_API_REVISION = "2026-05-20";
+
 const MAX_TTS_CHARS = 1600;
+
+/* ============================================================
+   TYPES
+   ============================================================ */
 
 type VoiceProfile = "female" | "male";
 
@@ -39,6 +54,12 @@ type GeminiVoice = "Kore" | "Charon";
    VOICE MAPPING
    ============================================================ */
 
+/**
+ * Cô Emily  = Kore
+ * Thầy David = Charon
+ *
+ * Đây là mapping duy nhất của hệ thống.
+ */
 function getGeminiVoice(
   voice: VoiceProfile
 ): GeminiVoice {
@@ -54,11 +75,13 @@ function getGeminiVoice(
 function normalizeVoice(
   value: unknown
 ): VoiceProfile {
-
   const voice = String(value ?? "")
     .trim()
     .toLowerCase();
 
+  /*
+   * Male / Thầy David
+   */
   if (
     voice === "male" ||
     voice === "man" ||
@@ -70,6 +93,12 @@ function normalizeVoice(
     return "male";
   }
 
+  /*
+   * Female / Cô Emily
+   *
+   * Mặc định female để tránh
+   * request không xác định.
+   */
   return "female";
 }
 
@@ -80,25 +109,47 @@ function normalizeVoice(
 function sanitizeText(
   value: unknown
 ): string {
-
   let text = String(value ?? "");
 
+  /*
+   * Remove markdown links:
+   * [text](url)
+   */
+  text = text.replace(
+    /\[[^\]]*\]\([^)]*\)/g,
+    " "
+  );
+
+  /*
+   * Remove markdown emphasis.
+   */
+  text = text.replace(
+    /[*_`~]/g,
+    " "
+  );
+
+  /*
+   * Remove HTML.
+   */
+  text = text.replace(
+    /<[^>]*>/g,
+    " "
+  );
+
+  /*
+   * Normalize whitespace.
+   */
   text = text
-    // Remove markdown links
-    .replace(/\[[^\]]*\]\([^)]*\)/g, " ")
-
-    // Remove markdown emphasis
-    .replace(/[*_`~]/g, " ")
-
-    // Remove HTML tags
-    .replace(/<[^>]*>/g, " ")
-
-    // Normalize whitespace
     .replace(/\s+/g, " ")
-
     .trim();
 
-  return text.slice(0, MAX_TTS_CHARS);
+  /*
+   * Prevent excessively large TTS requests.
+   */
+  return text.slice(
+    0,
+    MAX_TTS_CHARS
+  );
 }
 
 /* ============================================================
@@ -106,12 +157,10 @@ function sanitizeText(
    ============================================================ */
 
 function getApiKey(): string {
-
   const apiKey =
     process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
-
     const error: any =
       new Error(
         "GEMINI_API_KEY is missing."
@@ -129,23 +178,38 @@ function getApiKey(): string {
    PCM -> WAV
    ============================================================ */
 
+/**
+ * Gemini TTS returns:
+ *
+ * PCM
+ * 24 kHz
+ * mono
+ * 16-bit
+ *
+ * Safari / Chrome / Cốc Cốc
+ * can play the resulting WAV.
+ */
 function pcmToWav(
   pcm: Buffer,
   sampleRate = 24000
 ): Buffer {
-
   const channels = 1;
   const bitsPerSample = 16;
 
   const blockAlign =
-    channels * (bitsPerSample / 8);
+    channels *
+    (bitsPerSample / 8);
 
   const byteRate =
-    sampleRate * blockAlign;
+    sampleRate *
+    blockAlign;
 
   const header =
     Buffer.alloc(44);
 
+  /*
+   * RIFF
+   */
   header.write(
     "RIFF",
     0
@@ -156,11 +220,17 @@ function pcmToWav(
     4
   );
 
+  /*
+   * WAVE
+   */
   header.write(
     "WAVE",
     8
   );
 
+  /*
+   * fmt
+   */
   header.write(
     "fmt ",
     12
@@ -171,37 +241,57 @@ function pcmToWav(
     16
   );
 
-  // PCM
+  /*
+   * PCM format
+   */
   header.writeUInt16LE(
     1,
     20
   );
 
+  /*
+   * Mono
+   */
   header.writeUInt16LE(
     channels,
     22
   );
 
+  /*
+   * Sample rate
+   */
   header.writeUInt32LE(
     sampleRate,
     24
   );
 
+  /*
+   * Byte rate
+   */
   header.writeUInt32LE(
     byteRate,
     28
   );
 
+  /*
+   * Block align
+   */
   header.writeUInt16LE(
     blockAlign,
     32
   );
 
+  /*
+   * 16-bit
+   */
   header.writeUInt16LE(
     bitsPerSample,
     34
   );
 
+  /*
+   * data
+   */
   header.write(
     "data",
     36
@@ -219,7 +309,7 @@ function pcmToWav(
 }
 
 /* ============================================================
-   GEMINI TTS
+   GEMINI TTS - INTERACTIONS API
    ============================================================ */
 
 async function generateTTS(
@@ -234,77 +324,59 @@ async function generateTTS(
     getGeminiVoice(voice);
 
   /*
-   * IMPORTANT:
+   * IMPORTANT
    *
-   * Use Gemini generateContent REST API.
+   * Use Gemini Interactions API.
    *
-   * This avoids the invalid-argument problem currently
-   * occurring with the Interactions endpoint.
+   * This is the current Gemini TTS
+   * REST structure.
    */
-
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent`;
-
-  /*
-   * Official Gemini TTS structure:
-   *
-   * generationConfig
-   *   responseModalities: ["AUDIO"]
-   *   speechConfig
-   *     voiceConfig
-   *       prebuiltVoiceConfig
-   *         voiceName
-   */
-
   const payload = {
+    model: TTS_MODEL,
 
-    contents: [
-      {
-        parts: [
-          {
-            text:
-              "Read the following English learning text naturally, clearly and accurately. " +
-              "Use exactly one speaker and one consistent voice. " +
-              "Do not add words. " +
-              "Do not remove words. " +
-              "Do not translate. " +
-              "Do not paraphrase. " +
-              "Do not explain. " +
-              "Do not repeat words. " +
-              "Speak clearly at a natural English-learning pace.\n\n" +
-              text,
-          },
-        ],
-      },
-    ],
+    /*
+     * TTS input.
+     *
+     * Keep one speaker only.
+     */
+    input:
+      "Read the following English learning text naturally, clearly, and accurately. " +
+      "Use exactly one speaker and one consistent voice. " +
+      "Do not add words. " +
+      "Do not remove words. " +
+      "Do not translate. " +
+      "Do not paraphrase. " +
+      "Do not explain. " +
+      "Do not repeat words. " +
+      "Speak at a clear, natural English-learning pace.\n\n" +
+      text,
 
-    generationConfig: {
-
-      responseModalities: [
-        "AUDIO",
-      ],
-
-      speechConfig: {
-
-        voiceConfig: {
-
-          prebuiltVoiceConfig: {
-
-            voiceName:
-              geminiVoice,
-
-          },
-
-        },
-
-      },
-
+    /*
+     * IMPORTANT:
+     *
+     * Current Interactions API TTS schema.
+     */
+    response_format: {
+      type: "audio",
     },
 
+    /*
+     * EXACTLY ONE VOICE.
+     *
+     * female -> Kore
+     * male   -> Charon
+     */
+    generation_config: {
+      speech_config: [
+        {
+          voice: geminiVoice,
+        },
+      ],
+    },
   };
 
   console.log(
-    "[TTS] Gemini request",
+    "[TTS] Gemini Interactions request",
     {
       model: TTS_MODEL,
       requestedVoice: voice,
@@ -315,7 +387,7 @@ async function generateTTS(
 
   const response =
     await fetch(
-      url,
+      TTS_INTERACTIONS_URL,
       {
         method: "POST",
 
@@ -325,10 +397,19 @@ async function generateTTS(
 
           "x-goog-api-key":
             apiKey,
+
+          /*
+           * Required for the current
+           * Interactions schema migration.
+           */
+          "Api-Revision":
+            TTS_API_REVISION,
         },
 
         body:
-          JSON.stringify(payload),
+          JSON.stringify(
+            payload
+          ),
       }
     );
 
@@ -339,14 +420,16 @@ async function generateTTS(
 
   try {
     body =
-      JSON.parse(rawText);
+      JSON.parse(
+        rawText
+      );
   } catch {
     body = {};
   }
 
-  /* ========================================================
+  /* ==========================================================
      GEMINI ERROR
-     ======================================================== */
+     ========================================================== */
 
   if (!response.ok) {
 
@@ -369,7 +452,7 @@ async function generateTTS(
       );
 
     console.error(
-      "[TTS] Gemini error",
+      "[TTS] Gemini Interactions error",
       {
         status:
           response.status,
@@ -389,66 +472,76 @@ async function generateTTS(
     throw error;
   }
 
-  /* ========================================================
+  /* ==========================================================
      EXTRACT AUDIO
-     ======================================================== */
-
-  const parts =
-    body
-      ?.candidates?.[0]
-      ?.content
-      ?.parts;
-
-  if (
-    !Array.isArray(parts)
-  ) {
-
-    const error: any =
-      new Error(
-        "Gemini TTS returned no content parts."
-      );
-
-    error.status = 502;
-
-    throw error;
-  }
+     ========================================================== */
 
   /*
-   * Gemini TTS returns audio in:
+   * Current Interactions API:
    *
-   * inlineData.data
-   *
-   * MIME type is normally audio/L16.
+   * body.output_audio.data
    */
-
-  const audioPart =
-    parts.find(
-      (part: any) =>
-        part?.inlineData?.data
-    );
-
   const audioBase64 =
-    audioPart
-      ?.inlineData
-      ?.data;
+    body?.output_audio?.data;
+
+  /*
+   * Defensive fallback:
+   *
+   * Some API responses may expose
+   * the audio through an output array.
+   */
+  let finalAudioBase64 =
+    audioBase64;
 
   if (
-    !audioBase64 ||
-    typeof audioBase64 !== "string"
+    !finalAudioBase64 &&
+    Array.isArray(
+      body?.outputs
+    )
+  ) {
+
+    for (
+      const output of body.outputs
+    ) {
+
+      const candidate =
+        output?.audio?.data ||
+        output?.output_audio?.data ||
+        output?.data;
+
+      if (
+        typeof candidate ===
+        "string"
+      ) {
+        finalAudioBase64 =
+          candidate;
+
+        break;
+      }
+    }
+  }
+
+  if (
+    !finalAudioBase64 ||
+    typeof finalAudioBase64 !==
+      "string"
   ) {
 
     console.error(
-      "[TTS] No audio returned",
+      "[TTS] Gemini returned no audio",
       {
         voice,
         geminiVoice,
-        parts,
+        responseKeys:
+          Object.keys(
+            body || {}
+          ),
       }
     );
 
     const error: any =
       new Error(
-        "Gemini TTS did not return audio data."
+        "Gemini TTS did not return output_audio.data."
       );
 
     error.status = 502;
@@ -456,9 +549,13 @@ async function generateTTS(
     throw error;
   }
 
+  /* ==========================================================
+     BASE64 -> PCM
+     ========================================================== */
+
   const pcm =
     Buffer.from(
-      audioBase64,
+      finalAudioBase64,
       "base64"
     );
 
@@ -474,13 +571,23 @@ async function generateTTS(
     throw error;
   }
 
+  console.log(
+    "[TTS] Audio generated successfully",
+    {
+      voice,
+      geminiVoice,
+      pcmBytes:
+        pcm.length,
+    }
+  );
+
   /*
    * Gemini TTS audio:
+   *
    * 24 kHz
    * mono
    * 16-bit PCM
    */
-
   return pcmToWav(
     pcm,
     24000
@@ -496,9 +603,9 @@ export default async function handler(
   res: VercelResponse
 ) {
 
-  /* ========================================================
+  /* ==========================================================
      METHOD
-     ======================================================== */
+     ========================================================== */
 
   if (
     req.method !== "GET"
@@ -512,9 +619,9 @@ export default async function handler(
       });
   }
 
-  /* ========================================================
+  /* ==========================================================
      TEXT
-     ======================================================== */
+     ========================================================== */
 
   const text =
     sanitizeText(
@@ -531,9 +638,9 @@ export default async function handler(
       });
   }
 
-  /* ========================================================
+  /* ==========================================================
      VOICE
-     ======================================================== */
+     ========================================================== */
 
   const voice =
     normalizeVoice(
@@ -545,9 +652,9 @@ export default async function handler(
       voice
     );
 
-  /* ========================================================
+  /* ==========================================================
      GENERATE
-     ======================================================== */
+     ========================================================== */
 
   try {
 
@@ -557,9 +664,9 @@ export default async function handler(
         voice
       );
 
-    /* ======================================================
+    /* ========================================================
        AUDIO RESPONSE
-       ====================================================== */
+       ======================================================== */
 
     res.setHeader(
       "Content-Type",
@@ -576,27 +683,59 @@ export default async function handler(
       "inline"
     );
 
+    /*
+     * Safari / Chrome compatibility.
+     */
     res.setHeader(
       "Accept-Ranges",
       "bytes"
     );
 
     /*
-     * Cache:
-     *
-     * Same sentence + same voice
-     * can be reused.
+     * Prevent MIME sniffing.
      */
+    res.setHeader(
+      "X-Content-Type-Options",
+      "nosniff"
+    );
 
+    /*
+     * CORS.
+     *
+     * Same-origin app does not strictly
+     * require this, but it makes the
+     * endpoint more robust.
+     */
+    res.setHeader(
+      "Access-Control-Allow-Origin",
+      "*"
+    );
+
+    /*
+     * Cache audio by full URL.
+     *
+     * IMPORTANT:
+     *
+     * /api/tts?voice=female&text=Hello
+     *
+     * and
+     *
+     * /api/tts?voice=male&text=Hello
+     *
+     * are different URLs, therefore
+     * different cached responses.
+     */
     res.setHeader(
       "Cache-Control",
       "public, max-age=86400, stale-while-revalidate=3600"
     );
 
-    /* ======================================================
-       DEBUG HEADERS
-       ====================================================== */
-
+    /*
+     * DEBUG HEADERS
+     *
+     * These allow us to verify
+     * the exact voice used.
+     */
     res.setHeader(
       "X-TTS-Voice",
       voice
@@ -614,7 +753,7 @@ export default async function handler(
 
     res.setHeader(
       "X-TTS-API",
-      "generateContent-rest"
+      "interactions-rest"
     );
 
     return res
@@ -634,17 +773,20 @@ export default async function handler(
       "[TTS] Production error",
       {
         status,
+
         voice,
+
         geminiVoice,
+
         message:
           error?.message ||
           String(error),
       }
     );
 
-    /* ======================================================
+    /* ========================================================
        QUOTA
-       ====================================================== */
+       ======================================================== */
 
     if (
       status === 429
@@ -655,17 +797,20 @@ export default async function handler(
         .json({
           error:
             "Gemini TTS đang hết quota.",
+
           voice,
+
           geminiVoice,
+
           retryAfter:
             error?.retryAfter ||
             undefined,
         });
     }
 
-    /* ======================================================
+    /* ========================================================
        GENERAL ERROR
-       ====================================================== */
+       ======================================================== */
 
     return res
       .status(
