@@ -1,18 +1,23 @@
 // ============================================================================
 // TIENGANH9 – APPLICATION AUDIO ENGINE
 // ============================================================================
+//
 // Mục tiêu:
 //
 // 1. Một audio engine dùng chung toàn ứng dụng.
-// 2. Gemini TTS là đường phát chính.
-// 3. Cô Emily  = female
-// 4. Thầy David = male
-// 5. Một thời điểm chỉ có MỘT audio.
-// 6. Bấm nút mới sẽ dừng audio cũ.
-// 7. Cache audio đã tải.
-// 8. Gemini TTS lỗi/quota -> báo lỗi có kiểm soát; KHÔNG fallback SpeechSynthesis cho giọng giáo viên.
-// 9. Hỗ trợ đọc hội thoại tuần tự theo vai.
-// 10. Hạn chế gọi Gemini lặp lại khi gặp 429.
+// 2. Gemini TTS là đường phát ƯU TIÊN.
+// 3. Nếu Gemini hoạt động -> dùng giọng Gemini.
+// 4. Nếu Gemini hết quota / 429 / lỗi mạng -> FALLBACK Browser Speech.
+// 5. Browser Speech là phương án miễn phí, không tiêu tốn Gemini quota.
+// 6. Cô Emily  = female.
+// 7. Thầy David = male.
+// 8. Một thời điểm chỉ có MỘT audio.
+// 9. Bấm nút mới sẽ dừng audio cũ.
+// 10. Cache audio Gemini đã tải.
+// 11. Hạn chế gọi Gemini lặp lại khi gặp 429.
+// 12. Hỗ trợ đọc hội thoại tuần tự theo vai.
+// 13. Không để ứng dụng bị "câm" khi Gemini hết quota.
+//
 // ============================================================================
 
 export type VoiceProfile =
@@ -30,6 +35,8 @@ const MAX_TTS_CHARS = 1600;
 
 const CLIENT_CACHE_LIMIT = 100;
 
+// Khi Gemini trả 429, không gọi lại liên tục.
+// Sau khoảng thời gian này mới thử Gemini lại.
 const GEMINI_COOLDOWN_MS = 45_000;
 
 // ============================================================================
@@ -39,7 +46,10 @@ const GEMINI_COOLDOWN_MS = 45_000;
 let currentPreferredVoice: VoiceProfile =
   'female';
 
-const geminiUnavailableUntil: Record<VoiceProfile, number> = {
+const geminiUnavailableUntil: Record<
+  VoiceProfile,
+  number
+> = {
   female: 0,
   male: 0,
 };
@@ -83,7 +93,7 @@ export const setPreferredVoice = (
         voice
       );
     } catch {
-      // Ignore.
+      // Ignore storage errors.
     }
   }
 
@@ -116,7 +126,9 @@ export const subscribeVoiceChange = (
 export const sanitizeTextForTTS = (
   rawText: string
 ): string => {
-  if (!rawText) return '';
+  if (!rawText) {
+    return '';
+  }
 
   let text = String(rawText);
 
@@ -137,13 +149,13 @@ export const sanitizeTextForTTS = (
     ' '
   );
 
-  // Markdown.
+  // Remove markdown.
   text = text.replace(
     /[*_~`#>]/g,
     ' '
   );
 
-  // List markers.
+  // Remove list markers.
   text = text.replace(
     /^[A-D]\.\s+/i,
     ''
@@ -199,7 +211,9 @@ const splitTextIntoChunks = (
   for (const sentence of sentences) {
     const s = sentence.trim();
 
-    if (!s) continue;
+    if (!s) {
+      continue;
+    }
 
     if (s.length <= maxLength) {
       chunks.push(s);
@@ -283,8 +297,7 @@ export const unlockAudio = (): void => {
 
     if (
       context &&
-      context.state ===
-        'suspended'
+      context.state === 'suspended'
     ) {
       void context
         .resume()
@@ -333,16 +346,318 @@ if (typeof window !== 'undefined') {
   );
 }
 
-/**
- * Backward-compatible no-op.
- *
- * Teacher voices are Gemini-only now. Older components still import this
- * symbol to unlock browser audio after a user gesture; keeping the export
- * avoids a build break without re-enabling browser SpeechSynthesis.
- */
-export const unlockBrowserSpeech = (): void => {
-  // Intentionally empty. Gemini audio is played through HTMLAudioElement.
+// ============================================================================
+// BROWSER SPEECH ENGINE
+// ============================================================================
+//
+// Đây là phương án FALLBACK miễn phí.
+//
+// Khi Gemini TTS:
+// - hết quota
+// - trả 429
+// - lỗi mạng
+// - không trả audio
+//
+// ứng dụng sẽ tự động dùng SpeechSynthesis của trình duyệt.
+//
+// Không tiêu tốn Gemini API quota.
+//
+// ============================================================================
+
+type BrowserVoice =
+  SpeechSynthesisVoice;
+
+let browserVoices: BrowserVoice[] = [];
+
+let browserSpeechActive = false;
+
+// -----------------------------------------------------------------------------
+// LOAD / REFRESH BROWSER VOICES
+// -----------------------------------------------------------------------------
+
+const refreshBrowserVoices =
+  (): BrowserVoice[] => {
+    if (
+      typeof window === 'undefined' ||
+      !('speechSynthesis' in window)
+    ) {
+      return [];
+    }
+
+    try {
+      browserVoices =
+        window.speechSynthesis
+          .getVoices() || [];
+    } catch {
+      browserVoices = [];
+    }
+
+    return browserVoices;
+  };
+
+// Browser có thể tải voice bất đồng bộ.
+if (
+  typeof window !== 'undefined' &&
+  'speechSynthesis' in window
+) {
+  refreshBrowserVoices();
+
+  window.speechSynthesis.addEventListener(
+    'voiceschanged',
+    () => {
+      refreshBrowserVoices();
+    }
+  );
+}
+
+// -----------------------------------------------------------------------------
+// FIND BEST ENGLISH VOICE
+// -----------------------------------------------------------------------------
+
+const getEnglishVoice = (
+  profile: VoiceProfile
+): BrowserVoice | null => {
+  const voices =
+    refreshBrowserVoices();
+
+  if (!voices.length) {
+    return null;
+  }
+
+  // Chỉ ưu tiên giọng tiếng Anh.
+  const englishVoices =
+    voices.filter((voice) =>
+      /^en[-_]/i.test(
+        voice.lang || ''
+      )
+    );
+
+  const candidates =
+    englishVoices.length
+      ? englishVoices
+      : voices;
+
+  // Tên thường gặp cho giọng nữ.
+  const femaleHints = [
+    'samantha',
+    'ava',
+    'victoria',
+    'karen',
+    'moira',
+    'tessa',
+    'allison',
+    'zira',
+    'susan',
+    'female',
+  ];
+
+  // Tên thường gặp cho giọng nam.
+  const maleHints = [
+    'david',
+    'alex',
+    'daniel',
+    'fred',
+    'tom',
+    'george',
+    'mark',
+    'james',
+    'male',
+  ];
+
+  const hints =
+    profile === 'female'
+      ? femaleHints
+      : maleHints;
+
+  const matched =
+    candidates.find(
+      (voice) => {
+        const name =
+          String(
+            voice.name || ''
+          ).toLowerCase();
+
+        return hints.some(
+          (hint) =>
+            name.includes(hint)
+        );
+      }
+    );
+
+  return (
+    matched ||
+    candidates[0] ||
+    null
+  );
 };
+
+// -----------------------------------------------------------------------------
+// BROWSER SPEECH
+// -----------------------------------------------------------------------------
+
+const speakWithBrowser = (
+  text: string,
+  voice: VoiceProfile,
+  rate: number,
+  session: number
+): Promise<boolean> =>
+  new Promise(
+    (resolve) => {
+      if (
+        typeof window ===
+          'undefined' ||
+        !(
+          'speechSynthesis' in
+          window
+        )
+      ) {
+        resolve(false);
+        return;
+      }
+
+      if (
+        session !==
+        playbackSession
+      ) {
+        resolve(false);
+        return;
+      }
+
+      try {
+        const synth =
+          window.speechSynthesis;
+
+        // Dừng mọi câu Browser Speech cũ.
+        synth.cancel();
+
+        const utterance =
+          new SpeechSynthesisUtterance(
+            text
+          );
+
+        const selectedVoice =
+          getEnglishVoice(
+            voice
+          );
+
+        if (selectedVoice) {
+          utterance.voice =
+            selectedVoice;
+
+          utterance.lang =
+            selectedVoice.lang ||
+            'en-US';
+        } else {
+          // Nếu trình duyệt chưa có
+          // voice cụ thể, vẫn yêu cầu
+          // tiếng Anh.
+          utterance.lang =
+            'en-US';
+        }
+
+        utterance.rate =
+          Math.max(
+            0.75,
+            Math.min(
+              rate,
+              1.05
+            )
+          );
+
+        utterance.pitch =
+          voice === 'female'
+            ? 1.05
+            : 0.92;
+
+        utterance.volume = 1;
+
+        let settled = false;
+
+        const finish = (
+          success: boolean
+        ) => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+
+          utterance.onend =
+            null;
+
+          utterance.onerror =
+            null;
+
+          utterance.onpause =
+            null;
+
+          utterance.onresume =
+            null;
+
+          browserSpeechActive =
+            false;
+
+          resolve(success);
+        };
+
+        utterance.onend =
+          () => {
+            finish(true);
+          };
+
+        utterance.onerror =
+          () => {
+            finish(false);
+          };
+
+        browserSpeechActive =
+          true;
+
+        synth.speak(
+          utterance
+        );
+      } catch {
+        browserSpeechActive =
+          false;
+
+        resolve(false);
+      }
+    }
+  );
+
+// -----------------------------------------------------------------------------
+// BACKWARD-COMPATIBLE UNLOCK
+// -----------------------------------------------------------------------------
+//
+// Một số component cũ có thể vẫn import hàm này.
+// Giữ export để không gây lỗi build.
+//
+// -----------------------------------------------------------------------------
+
+export const unlockBrowserSpeech =
+  (): void => {
+    try {
+      if (
+        typeof window ===
+          'undefined' ||
+        !(
+          'speechSynthesis' in
+          window
+        )
+      ) {
+        return;
+      }
+
+      refreshBrowserVoices();
+
+      // Không đọc ở đây.
+      // Chỉ chuẩn bị Browser Speech.
+      window.speechSynthesis
+        .cancel();
+    } catch {
+      // Ignore.
+    }
+  };
 
 // ============================================================================
 // GLOBAL PLAYBACK STATE
@@ -351,8 +666,6 @@ export const unlockBrowserSpeech = (): void => {
 let activeAudio:
   | HTMLAudioElement
   | null = null;
-
-let browserSpeechActive = false;
 
 let playbackSession = 0;
 
@@ -384,7 +697,9 @@ const buildTtsUrl = (
 ): string =>
   `/api/tts?voice=${encodeURIComponent(
     voice
-  )}&text=${encodeURIComponent(text)}`;
+  )}&text=${encodeURIComponent(
+    text
+  )}`;
 
 const rememberBlobUrl = (
   key: string,
@@ -406,21 +721,30 @@ const rememberBlobUrl = (
     }
   }
 
-  clientAudioCache.delete(key);
-  clientAudioCache.set(key, url);
+  clientAudioCache.delete(
+    key
+  );
+
+  clientAudioCache.set(
+    key,
+    url
+  );
 
   while (
     clientAudioCache.size >
     CLIENT_CACHE_LIMIT
   ) {
     const oldestKey =
-      clientAudioCache.keys()
+      clientAudioCache
+        .keys()
         .next()
         .value as
         | string
         | undefined;
 
-    if (!oldestKey) break;
+    if (!oldestKey) {
+      break;
+    }
 
     const oldestUrl =
       clientAudioCache.get(
@@ -449,25 +773,32 @@ const rememberBlobUrl = (
 
 export const stopSpeaking =
   (): void => {
+    // Tăng session để mọi audio
+    // đang chờ phải dừng.
     playbackSession += 1;
 
     audioCurrentlyPlaying =
       false;
 
-    // Stop any browser SpeechSynthesis fallback immediately.
+    // Dừng Browser Speech.
     if (
-      typeof window !== 'undefined' &&
-      'speechSynthesis' in window
+      typeof window !==
+        'undefined' &&
+      'speechSynthesis' in
+        window
     ) {
       try {
-        window.speechSynthesis.cancel();
+        window.speechSynthesis
+          .cancel();
       } catch {
-        // Ignore browser speech errors.
+        // Ignore.
       }
     }
 
-    browserSpeechActive = false;
+    browserSpeechActive =
+      false;
 
+    // Dừng Gemini HTMLAudio.
     if (activeAudio) {
       try {
         activeAudio.onended =
@@ -498,15 +829,22 @@ export const isSpeakingActive =
   (): boolean =>
     audioCurrentlyPlaying;
 
-/**
- * Teacher voices are intentionally Gemini-only. This flag is informational
- * and does not select or synthesize a browser voice.
- */
-export const isTeacherVoiceEngineAvailable = (voice: VoiceProfile = currentPreferredVoice): boolean =>
-  Date.now() >= geminiUnavailableUntil[voice];
+// ============================================================================
+// ENGINE STATUS
+// ============================================================================
+
+export const isTeacherVoiceEngineAvailable =
+  (
+    voice: VoiceProfile =
+      currentPreferredVoice
+  ): boolean =>
+    Date.now() >=
+    geminiUnavailableUntil[
+      voice
+    ];
 
 // ============================================================================
-// FETCH / CACHE ONE AUDIO
+// FETCH / CACHE ONE GEMINI AUDIO
 // ============================================================================
 
 const loadAudioUrl = async (
@@ -514,42 +852,67 @@ const loadAudioUrl = async (
   voice: VoiceProfile
 ): Promise<string | null> => {
   const cleanText =
-    sanitizeTextForTTS(text);
+    sanitizeTextForTTS(
+      text
+    );
 
   if (!cleanText) {
     return null;
   }
 
-  const key = cacheKey(
-    cleanText,
-    voice
-  );
+  const key =
+    cacheKey(
+      cleanText,
+      voice
+    );
+
+  // --------------------------------------------------------------------------
+  // CACHE HIT
+  // --------------------------------------------------------------------------
 
   const cached =
-    clientAudioCache.get(key);
+    clientAudioCache.get(
+      key
+    );
 
   if (cached) {
     return cached;
   }
 
+  // --------------------------------------------------------------------------
+  // EXISTING REQUEST
+  // --------------------------------------------------------------------------
+
   const existing =
-    clientPreloadPromises.get(key);
+    clientPreloadPromises.get(
+      key
+    );
 
   if (existing) {
     return await existing;
   }
 
+  // --------------------------------------------------------------------------
+  // CREATE REQUEST
+  // --------------------------------------------------------------------------
+
   const promise =
     (async () => {
       try {
-        // When Gemini has already failed recently, do not keep hitting the endpoint.
-        // The caller will fail closed rather than changing the teacher voice.
+        // Nếu Gemini vừa trả 429,
+        // không tiếp tục spam API.
         if (
           Date.now() <
-          geminiUnavailableUntil[voice]
+          geminiUnavailableUntil[
+            voice
+          ]
         ) {
           return null;
         }
+
+        console.log(
+          `[TTS] Request Gemini for ${voice} voice`
+        );
 
         const response =
           await fetch(
@@ -559,41 +922,76 @@ const loadAudioUrl = async (
             ),
             {
               method: 'GET',
+
+              // Không để browser cache
+              // response lỗi.
               cache: 'no-store',
             }
           );
 
-        if (!response.ok) {
-          geminiUnavailableUntil[voice] =
-            Date.now() +
-            GEMINI_COOLDOWN_MS;
+        // --------------------------------------------------------------------
+        // GEMINI ERROR
+        // --------------------------------------------------------------------
 
-          let serverMessage = '';
+        if (!response.ok) {
+          let serverMessage =
+            '';
+
           try {
-            const body = await response.clone().json();
-            serverMessage = String(body?.error || '');
+            const body =
+              await response
+                .clone()
+                .json();
+
+            serverMessage =
+              String(
+                body?.error ||
+                ''
+              );
           } catch {
             // Response may not be JSON.
           }
 
           console.warn(
-            `Gemini TTS unavailable (${response.status}). ` +
-            (serverMessage || 'Teacher voice audio is unavailable.')
+            `[TTS] Gemini unavailable (${response.status}).`,
+            serverMessage ||
+              'Using Browser Speech fallback.'
           );
+
+          // Với 429 hoặc lỗi server,
+          // cooldown Gemini.
+          if (
+            response.status ===
+              429 ||
+            response.status >=
+              500
+          ) {
+            geminiUnavailableUntil[
+              voice
+            ] =
+              Date.now() +
+              GEMINI_COOLDOWN_MS;
+          }
 
           return null;
         }
+
+        // --------------------------------------------------------------------
+        // AUDIO BLOB
+        // --------------------------------------------------------------------
 
         const blob =
           await response.blob();
 
         if (!blob.size) {
           console.warn(
-            'Gemini TTS returned an empty audio response. ' +
-            'Teacher voice audio is unavailable.'
+            '[TTS] Gemini returned empty audio. ' +
+            'Using Browser Speech fallback.'
           );
 
-          geminiUnavailableUntil[voice] =
+          geminiUnavailableUntil[
+            voice
+          ] =
             Date.now() +
             GEMINI_COOLDOWN_MS;
 
@@ -610,14 +1008,21 @@ const loadAudioUrl = async (
           url
         );
 
+        console.log(
+          `[TTS] Gemini audio ready (${voice})`
+        );
+
         return url;
       } catch (error) {
         console.warn(
-          'TTS network error. Teacher voice audio is unavailable:',
+          '[TTS] Gemini network error. ' +
+          'Using Browser Speech fallback.',
           error
         );
 
-        geminiUnavailableUntil[voice] =
+        geminiUnavailableUntil[
+          voice
+        ] =
           Date.now() +
           GEMINI_COOLDOWN_MS;
 
@@ -636,8 +1041,18 @@ const loadAudioUrl = async (
 
   return await promise;
 };
+
 // ============================================================================
 // PRELOAD
+// ============================================================================
+//
+// Gemini còn quota:
+//   -> preload audio.
+//
+// Gemini hết quota:
+//   -> không coi đó là lỗi nghiêm trọng.
+//   -> Browser Speech không cần preload.
+//   -> trả true để UI không báo lỗi.
 // ============================================================================
 
 export const preloadSpeech =
@@ -646,7 +1061,9 @@ export const preloadSpeech =
     customVoice?: VoiceProfile
   ): Promise<boolean> => {
     const cleanText =
-      sanitizeTextForTTS(text);
+      sanitizeTextForTTS(
+        text
+      );
 
     if (!cleanText) {
       return false;
@@ -673,7 +1090,14 @@ export const preloadSpeech =
         );
 
       if (!url) {
-        return false;
+        // Gemini unavailable.
+        //
+        // Browser Speech không cần
+        // preload audio.
+        //
+        // Vì vậy coi preload là thành công
+        // ở cấp độ ứng dụng.
+        return true;
       }
     }
 
@@ -681,59 +1105,21 @@ export const preloadSpeech =
   };
 
 // ============================================================================
-// GEMINI TEACHER TTS ONLY
-// ============================================================================
-// Do not use SpeechSynthesis for teacher voices. Browser engines cannot
-// guarantee the requested speaker identity (Emily/David).
+// PLAY GEMINI AUDIO ONE CHUNK
 // ============================================================================
 
-// ============================================================================
-// PLAY ONE CHUNK
-// ============================================================================
-
-const playOneChunk = (
-  text: string,
-  voice: VoiceProfile,
+const playGeminiChunk = (
+  url: string,
   rate: number,
   session: number
 ): Promise<boolean> =>
   new Promise(
-    async (resolve) => {
+    (resolve) => {
       if (
-        typeof window === 'undefined' ||
-        session !== playbackSession
-      ) {
-        resolve(false);
-        return;
-      }
-
-      const cleanText =
-        sanitizeTextForTTS(text);
-
-      if (!cleanText) {
-        resolve(true);
-        return;
-      }
-
-      const url =
-        await loadAudioUrl(
-          cleanText,
-          voice
-        );
-
-      // Teacher voices are Gemini-only. Never fall back to the browser
-      // SpeechSynthesis engine because it cannot guarantee the requested
-      // male/female identity. A failed Gemini request must fail closed.
-      if (!url) {
-        console.warn(
-          `Teacher TTS unavailable for ${voice} voice; refusing browser fallback.`
-        );
-        resolve(false);
-        return;
-      }
-
-      if (
-        session !== playbackSession
+        typeof window ===
+          'undefined' ||
+        session !==
+          playbackSession
       ) {
         resolve(false);
         return;
@@ -742,7 +1128,8 @@ const playOneChunk = (
       const audio =
         new Audio();
 
-      audio.preload = 'auto';
+      audio.preload =
+        'auto';
 
       audio.setAttribute(
         'playsinline',
@@ -767,38 +1154,54 @@ const playOneChunk = (
 
       audio.src = url;
 
-      activeAudio = audio;
+      activeAudio =
+        audio;
 
       let settled = false;
 
       const finish = (
         success: boolean
       ) => {
-        if (settled) return;
+        if (settled) {
+          return;
+        }
 
         settled = true;
 
-        audio.onended = null;
-        audio.onerror = null;
-        audio.onabort = null;
+        audio.onended =
+          null;
+
+        audio.onerror =
+          null;
+
+        audio.onabort =
+          null;
 
         if (
-          activeAudio === audio
+          activeAudio ===
+          audio
         ) {
-          activeAudio = null;
+          activeAudio =
+            null;
         }
 
         resolve(success);
       };
 
-      audio.onended = () =>
-        finish(true);
+      audio.onended =
+        () => {
+          finish(true);
+        };
 
-      audio.onerror = () =>
-        finish(false);
+      audio.onerror =
+        () => {
+          finish(false);
+        };
 
-      audio.onabort = () =>
-        finish(false);
+      audio.onabort =
+        () => {
+          finish(false);
+        };
 
       try {
         const playPromise =
@@ -806,10 +1209,14 @@ const playOneChunk = (
 
         if (
           playPromise &&
-          typeof playPromise.catch === 'function'
+          typeof playPromise
+            .catch ===
+            'function'
         ) {
           playPromise.catch(
-            () => finish(false)
+            () => {
+              finish(false);
+            }
           );
         }
       } catch {
@@ -818,68 +1225,203 @@ const playOneChunk = (
     }
   );
 
+// ============================================================================
+// PLAY ONE CHUNK
+// ============================================================================
+//
+// Chiến lược:
+//
+// 1. Thử Gemini.
+// 2. Nếu Gemini có audio -> phát Gemini.
+// 3. Nếu Gemini 429/quota/error -> Browser Speech.
+// 4. Nếu Browser Speech cũng lỗi -> false.
+//
+// ============================================================================
+
+const playOneChunk = (
+  text: string,
+  voice: VoiceProfile,
+  rate: number,
+  session: number
+): Promise<boolean> =>
+  new Promise(
+    async (resolve) => {
+      if (
+        typeof window ===
+          'undefined' ||
+        session !==
+          playbackSession
+      ) {
+        resolve(false);
+        return;
+      }
+
+      const cleanText =
+        sanitizeTextForTTS(
+          text
+        );
+
+      if (!cleanText) {
+        resolve(true);
+        return;
+      }
+
+      // ----------------------------------------------------------------------
+      // TRY GEMINI
+      // ----------------------------------------------------------------------
+
+      const url =
+        await loadAudioUrl(
+          cleanText,
+          voice
+        );
+
+      // ----------------------------------------------------------------------
+      // GEMINI UNAVAILABLE
+      // -> FREE BROWSER FALLBACK
+      // ----------------------------------------------------------------------
+
+      if (!url) {
+        console.warn(
+          `[TTS] Gemini unavailable -> Browser Speech fallback (${voice})`
+        );
+
+        const browserOk =
+          await speakWithBrowser(
+            cleanText,
+            voice,
+            rate,
+            session
+          );
+
+        resolve(
+          browserOk
+        );
+
+        return;
+      }
+
+      // Session có thể đã bị thay đổi
+      // trong lúc chờ fetch.
+      if (
+        session !==
+        playbackSession
+      ) {
+        resolve(false);
+        return;
+      }
+
+      // ----------------------------------------------------------------------
+      // PLAY GEMINI AUDIO
+      // ----------------------------------------------------------------------
+
+      const geminiOk =
+        await playGeminiChunk(
+          url,
+          rate,
+          session
+        );
+
+      if (geminiOk) {
+        resolve(true);
+        return;
+      }
+
+      // ----------------------------------------------------------------------
+      // GEMINI AUDIO PLAY FAILED
+      // -> FALLBACK BROWSER
+      // ----------------------------------------------------------------------
+
+      console.warn(
+        '[TTS] Gemini audio playback failed -> Browser Speech fallback.'
+      );
+
+      if (
+        session !==
+        playbackSession
+      ) {
+        resolve(false);
+        return;
+      }
+
+      const browserOk =
+        await speakWithBrowser(
+          cleanText,
+          voice,
+          rate,
+          session
+        );
+
+      resolve(
+        browserOk
+      );
+    }
+  );
 
 // ============================================================================
 // PLAY INTERNAL TEXT
 // ============================================================================
 
-const playTextInternal = async (
-  text: string,
-  voice: VoiceProfile,
-  rate: number,
-  session: number
-): Promise<boolean> => {
-  const chunks =
-    splitTextIntoChunks(
-      sanitizeTextForTTS(text)
-    );
-
-  if (!chunks.length) {
-    return true;
-  }
-
-  for (
-    let index = 0;
-    index < chunks.length;
-    index += 1
-  ) {
-    if (
-      session !==
-      playbackSession
-    ) {
-      return false;
-    }
-
-    const ok =
-      await playOneChunk(
-        chunks[index],
-        voice,
-        rate,
-        session
+const playTextInternal =
+  async (
+    text: string,
+    voice: VoiceProfile,
+    rate: number,
+    session: number
+  ): Promise<boolean> => {
+    const chunks =
+      splitTextIntoChunks(
+        sanitizeTextForTTS(
+          text
+        )
       );
 
-    if (!ok) {
-      return false;
+    if (!chunks.length) {
+      return true;
     }
 
-    // Small gap prevents accidental acoustic overlap
-    // between consecutive HTMLAudio elements.
-    if (
+    for (
+      let index = 0;
       index <
-      chunks.length - 1
+      chunks.length;
+      index += 1
     ) {
-      await new Promise(
-        (resolve) =>
-          window.setTimeout(
-            resolve,
-            60
-          )
-      );
-    }
-  }
+      if (
+        session !==
+        playbackSession
+      ) {
+        return false;
+      }
 
-  return true;
-};
+      const ok =
+        await playOneChunk(
+          chunks[index],
+          voice,
+          rate,
+          session
+        );
+
+      if (!ok) {
+        return false;
+      }
+
+      // Khoảng nghỉ nhỏ giữa các chunk.
+      if (
+        index <
+        chunks.length - 1
+      ) {
+        await new Promise(
+          (resolve) =>
+            window.setTimeout(
+              resolve,
+              60
+            )
+        );
+      }
+    }
+
+    return true;
+  };
 
 // ============================================================================
 // PUBLIC SINGLE SPEECH
@@ -901,16 +1443,23 @@ export const speakEnglish =
     }
 
     const cleanText =
-      sanitizeTextForTTS(text);
+      sanitizeTextForTTS(
+        text
+      );
 
     if (!cleanText) {
       onEnd?.();
       return;
     }
 
+    // Dừng audio trước.
     stopSpeaking();
 
+    // Mở khóa audio.
     unlockAudio();
+
+    // Chuẩn bị Browser Speech.
+    unlockBrowserSpeech();
 
     const voice =
       customVoice ||
@@ -937,7 +1486,11 @@ export const speakEnglish =
         audioCurrentlyPlaying =
           false;
 
-        activeAudio = null;
+        activeAudio =
+          null;
+
+        browserSpeechActive =
+          false;
 
         onEnd?.();
       }
@@ -991,14 +1544,21 @@ export const speakDialogue =
           )
       );
 
-    if (!validLines.length) {
+    if (
+      !validLines.length
+    ) {
       callbacks?.onEnd?.();
       return;
     }
 
+    // Dừng audio cũ.
     stopSpeaking();
 
+    // Mở khóa audio.
     unlockAudio();
+
+    // Chuẩn bị Browser Speech.
+    unlockBrowserSpeech();
 
     const session =
       playbackSession;
@@ -1049,7 +1609,7 @@ export const speakDialogue =
           index
         );
 
-        // Deliberate micro-gap between speakers.
+        // Khoảng nghỉ giữa hai người nói.
         await new Promise(
           (resolve) =>
             window.setTimeout(
@@ -1066,7 +1626,11 @@ export const speakDialogue =
         audioCurrentlyPlaying =
           false;
 
-        activeAudio = null;
+        activeAudio =
+          null;
+
+        browserSpeechActive =
+          false;
 
         callbacks?.onEnd?.();
       }
@@ -1123,7 +1687,13 @@ export const playSoundEffect =
         context.destination
       );
 
-      if (type === 'click') {
+      // ----------------------------------------------------------------------
+      // CLICK
+      // ----------------------------------------------------------------------
+
+      if (
+        type === 'click'
+      ) {
         const oscillator =
           context.createOscillator();
 
@@ -1155,6 +1725,7 @@ export const playSoundEffect =
         );
 
         oscillator.start(now);
+
         oscillator.stop(
           now + 0.04
         );
@@ -1162,7 +1733,13 @@ export const playSoundEffect =
         return;
       }
 
-      if (type === 'correct') {
+      // ----------------------------------------------------------------------
+      // CORRECT
+      // ----------------------------------------------------------------------
+
+      if (
+        type === 'correct'
+      ) {
         const oscillator =
           context.createOscillator();
 
@@ -1199,6 +1776,7 @@ export const playSoundEffect =
         );
 
         oscillator.start(now);
+
         oscillator.stop(
           now + 0.25
         );
@@ -1206,7 +1784,13 @@ export const playSoundEffect =
         return;
       }
 
-      if (type === 'wrong') {
+      // ----------------------------------------------------------------------
+      // WRONG
+      // ----------------------------------------------------------------------
+
+      if (
+        type === 'wrong'
+      ) {
         const oscillator =
           context.createOscillator();
 
@@ -1238,6 +1822,7 @@ export const playSoundEffect =
         );
 
         oscillator.start(now);
+
         oscillator.stop(
           now + 0.22
         );
@@ -1245,7 +1830,13 @@ export const playSoundEffect =
         return;
       }
 
-      if (type === 'win') {
+      // ----------------------------------------------------------------------
+      // WIN
+      // ----------------------------------------------------------------------
+
+      if (
+        type === 'win'
+      ) {
         [
           523.25,
           659.25,
@@ -1305,8 +1896,13 @@ export const playSoundEffect =
         return;
       }
 
+      // ----------------------------------------------------------------------
+      // APPLAUSE / SUCCESS
+      // ----------------------------------------------------------------------
+
       if (
-        type === 'applause'
+        type ===
+        'applause'
       ) {
         const oscillator =
           context.createOscillator();
@@ -1347,7 +1943,13 @@ export const playSoundEffect =
         return;
       }
 
-      if (type === 'chime') {
+      // ----------------------------------------------------------------------
+      // CHIME
+      // ----------------------------------------------------------------------
+
+      if (
+        type === 'chime'
+      ) {
         const oscillator =
           context.createOscillator();
 
@@ -1383,8 +1985,14 @@ export const playSoundEffect =
         oscillator.stop(
           now + 0.2
         );
+
+        return;
       }
     } catch {
       // Sound effects are non-critical.
     }
   };
+
+// ============================================================================
+// END OF AUDIO ENGINE
+// ============================================================================
