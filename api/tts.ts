@@ -3,135 +3,119 @@ import type { VercelRequest, VercelResponse } from "@vercel/node";
 /**
  * TIENGANH9 - Production TTS
  *
- * Cô Emily  -> female -> Gemini Kore
- * Thầy David -> male   -> Gemini Charon
+ * Cô Emily  -> female -> Kore
+ * Thầy David -> male   -> Charon
  *
- * Endpoint:
- *   /api/tts?text=Hello&voice=female
- *   /api/tts?text=Hello&voice=male
+ * Kiến trúc:
+ * Browser
+ *    ↓
+ * /api/tts
+ *    ↓
+ * Gemini 3.1 Flash TTS
+ *    ↓
+ * PCM 24kHz / mono / 16-bit
+ *    ↓
+ * WAV
  *
- * Gemini:
- *   gemini-3.1-flash-tts-preview
- *
- * Output:
- *   WAV 24 kHz / mono / 16-bit PCM
- *
- * Browser:
- *   Safari
- *   Chrome
- *   Cốc Cốc
- *   Android Chrome
- *   Windows Chrome
+ * Mục tiêu:
+ * - Safari
+ * - Chrome
+ * - Cốc Cốc
+ * - Android Chrome
+ * - Windows Chrome
  *
  * Không dùng SpeechSynthesis làm TTS chính.
  */
 
-/* ============================================================
-   CONFIG
-   ============================================================ */
-
 const TTS_MODEL = "gemini-3.1-flash-tts-preview";
-
-const GEMINI_API_URL =
-  `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent`;
 
 const MAX_TTS_CHARS = 1600;
 
 type VoiceProfile = "female" | "male";
+
 type GeminiVoice = "Kore" | "Charon";
 
 /* ============================================================
    VOICE MAPPING
    ============================================================ */
 
-const getGeminiVoice = (
+function getGeminiVoice(
   voice: VoiceProfile
-): GeminiVoice => {
-  return voice === "male" ? "Charon" : "Kore";
-};
+): GeminiVoice {
+  return voice === "male"
+    ? "Charon"
+    : "Kore";
+}
 
 /* ============================================================
    NORMALIZE VOICE
    ============================================================ */
 
-const normalizeVoice = (
+function normalizeVoice(
   value: unknown
-): VoiceProfile => {
+): VoiceProfile {
+
   const voice = String(value ?? "")
     .trim()
     .toLowerCase();
 
-  /*
-   * FEMALE
-   */
-  if (
-    voice === "" ||
-    voice === "female" ||
-    voice === "emily" ||
-    voice === "kore"
-  ) {
-    return "female";
-  }
-
-  /*
-   * MALE
-   */
   if (
     voice === "male" ||
+    voice === "man" ||
     voice === "david" ||
+    voice === "thay david" ||
+    voice === "thầy david" ||
     voice === "charon"
   ) {
     return "male";
   }
 
-  /*
-   * Không cho phép voice lạ tự động
-   * làm sai mapping.
-   *
-   * Giữ female làm fallback tương thích
-   * với frontend cũ.
-   */
-  console.warn(
-    "Unknown TTS voice, fallback to female:",
-    value
-  );
-
   return "female";
-};
+}
 
 /* ============================================================
    CLEAN TEXT
    ============================================================ */
 
-const sanitizeText = (
+function sanitizeText(
   value: unknown
-): string => {
+): string {
+
   let text = String(value ?? "");
 
-  /*
-   * Loại bỏ markdown code/link đơn giản.
-   */
   text = text
-    .replace(/\[[^\]]*\]\([^)]+\)/g, " ")
-    .replace(/\{[^}]*\}/g, " ")
+    // Remove markdown links
+    .replace(/\[[^\]]*\]\([^)]*\)/g, " ")
+
+    // Remove markdown emphasis
+    .replace(/[*_`~]/g, " ")
+
+    // Remove HTML tags
+    .replace(/<[^>]*>/g, " ")
+
+    // Normalize whitespace
     .replace(/\s+/g, " ")
+
     .trim();
 
   return text.slice(0, MAX_TTS_CHARS);
-};
+}
 
 /* ============================================================
    API KEY
    ============================================================ */
 
-const getApiKey = (): string => {
+function getApiKey(): string {
+
   const apiKey =
-    process.env.GEMINI_API_KEY?.trim();
+    process.env.GEMINI_API_KEY;
 
   if (!apiKey) {
-    const error: any = new Error(
-      "GEMINI_API_KEY is missing."
-    );
+
+    const error: any =
+      new Error(
+        "GEMINI_API_KEY is missing."
+      );
 
     error.status = 500;
 
@@ -139,16 +123,17 @@ const getApiKey = (): string => {
   }
 
   return apiKey;
-};
+}
 
 /* ============================================================
    PCM -> WAV
    ============================================================ */
 
-const pcmToWav = (
+function pcmToWav(
   pcm: Buffer,
   sampleRate = 24000
-): Buffer => {
+): Buffer {
+
   const channels = 1;
   const bitsPerSample = 16;
 
@@ -158,36 +143,35 @@ const pcmToWav = (
   const byteRate =
     sampleRate * blockAlign;
 
-  /*
-   * PCM 16-bit phải có số byte chẵn.
-   */
-  if (pcm.length % 2 !== 0) {
-    throw new Error(
-      "Invalid PCM audio: odd byte length."
-    );
-  }
+  const header =
+    Buffer.alloc(44);
 
-  const header = Buffer.alloc(44);
-
-  header.write("RIFF", 0);
+  header.write(
+    "RIFF",
+    0
+  );
 
   header.writeUInt32LE(
     36 + pcm.length,
     4
   );
 
-  header.write("WAVE", 8);
+  header.write(
+    "WAVE",
+    8
+  );
 
-  header.write("fmt ", 12);
+  header.write(
+    "fmt ",
+    12
+  );
 
   header.writeUInt32LE(
     16,
     16
   );
 
-  /*
-   * AudioFormat = 1 = PCM
-   */
+  // PCM
   header.writeUInt16LE(
     1,
     20
@@ -218,7 +202,10 @@ const pcmToWav = (
     34
   );
 
-  header.write("data", 36);
+  header.write(
+    "data",
+    36
+  );
 
   header.writeUInt32LE(
     pcm.length,
@@ -229,71 +216,48 @@ const pcmToWav = (
     header,
     pcm,
   ]);
-};
-
-/* ============================================================
-   EXTRACT GEMINI AUDIO
-   ============================================================ */
-
-const extractAudioBase64 = (
-  body: any
-): string | null => {
-  /*
-   * Gemini REST thường trả:
-   *
-   * candidates[0]
-   *   .content
-   *   .parts[]
-   *   .inlineData
-   *   .data
-   *
-   * Hỗ trợ thêm inline_data để an toàn
-   * với các biến thể response.
-   */
-
-  const parts =
-    body?.candidates?.[0]?.content?.parts;
-
-  if (!Array.isArray(parts)) {
-    return null;
-  }
-
-  for (const part of parts) {
-    const data =
-      part?.inlineData?.data ??
-      part?.inline_data?.data;
-
-    if (
-      typeof data === "string" &&
-      data.length > 0
-    ) {
-      return data;
-    }
-  }
-
-  return null;
-};
+}
 
 /* ============================================================
    GEMINI TTS
    ============================================================ */
 
-const generateTTS = async (
+async function generateTTS(
   text: string,
   voice: VoiceProfile
-): Promise<Buffer> => {
-  const apiKey = getApiKey();
+): Promise<Buffer> {
+
+  const apiKey =
+    getApiKey();
 
   const geminiVoice =
     getGeminiVoice(voice);
 
   /*
-   * Dùng generateContent REST chính thức
-   * thay cho Interactions REST.
+   * IMPORTANT:
    *
-   * Đây là cấu trúc Gemini TTS hiện hành.
+   * Use Gemini generateContent REST API.
+   *
+   * This avoids the invalid-argument problem currently
+   * occurring with the Interactions endpoint.
    */
+
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent`;
+
+  /*
+   * Official Gemini TTS structure:
+   *
+   * generationConfig
+   *   responseModalities: ["AUDIO"]
+   *   speechConfig
+   *     voiceConfig
+   *       prebuiltVoiceConfig
+   *         voiceName
+   */
+
   const payload = {
+
     contents: [
       {
         parts: [
@@ -307,7 +271,7 @@ const generateTTS = async (
               "Do not paraphrase. " +
               "Do not explain. " +
               "Do not repeat words. " +
-              "Do not create echo, doubling, chorus, reverb, or overlapping speech.\n\n" +
+              "Speak clearly at a natural English-learning pace.\n\n" +
               text,
           },
         ],
@@ -315,23 +279,32 @@ const generateTTS = async (
     ],
 
     generationConfig: {
+
       responseModalities: [
         "AUDIO",
       ],
 
       speechConfig: {
+
         voiceConfig: {
+
           prebuiltVoiceConfig: {
+
             voiceName:
               geminiVoice,
+
           },
+
         },
+
       },
+
     },
+
   };
 
   console.log(
-    "Gemini TTS request:",
+    "[TTS] Gemini request",
     {
       model: TTS_MODEL,
       requestedVoice: voice,
@@ -342,7 +315,7 @@ const generateTTS = async (
 
   const response =
     await fetch(
-      GEMINI_API_URL,
+      url,
       {
         method: "POST",
 
@@ -355,29 +328,28 @@ const generateTTS = async (
         },
 
         body:
-          JSON.stringify(
-            payload
-          ),
+          JSON.stringify(payload),
       }
     );
 
   const rawText =
     await response.text();
 
-  let body: any = null;
+  let body: any = {};
 
   try {
     body =
       JSON.parse(rawText);
   } catch {
-    body = null;
+    body = {};
   }
 
-  /* ----------------------------------------------------------
+  /* ========================================================
      GEMINI ERROR
-     ---------------------------------------------------------- */
+     ======================================================== */
 
   if (!response.ok) {
+
     const message =
       body?.error?.message ||
       body?.message ||
@@ -397,7 +369,7 @@ const generateTTS = async (
       );
 
     console.error(
-      "Gemini TTS failed:",
+      "[TTS] Gemini error",
       {
         status:
           response.status,
@@ -417,17 +389,61 @@ const generateTTS = async (
     throw error;
   }
 
-  /* ----------------------------------------------------------
+  /* ========================================================
      EXTRACT AUDIO
-     ---------------------------------------------------------- */
+     ======================================================== */
+
+  const parts =
+    body
+      ?.candidates?.[0]
+      ?.content
+      ?.parts;
+
+  if (
+    !Array.isArray(parts)
+  ) {
+
+    const error: any =
+      new Error(
+        "Gemini TTS returned no content parts."
+      );
+
+    error.status = 502;
+
+    throw error;
+  }
+
+  /*
+   * Gemini TTS returns audio in:
+   *
+   * inlineData.data
+   *
+   * MIME type is normally audio/L16.
+   */
+
+  const audioPart =
+    parts.find(
+      (part: any) =>
+        part?.inlineData?.data
+    );
 
   const audioBase64 =
-    extractAudioBase64(body);
+    audioPart
+      ?.inlineData
+      ?.data;
 
-  if (!audioBase64) {
+  if (
+    !audioBase64 ||
+    typeof audioBase64 !== "string"
+  ) {
+
     console.error(
-      "Gemini TTS response has no audio:",
-      body
+      "[TTS] No audio returned",
+      {
+        voice,
+        geminiVoice,
+        parts,
+      }
     );
 
     const error: any =
@@ -440,10 +456,6 @@ const generateTTS = async (
     throw error;
   }
 
-  /* ----------------------------------------------------------
-     BASE64 -> PCM
-     ---------------------------------------------------------- */
-
   const pcm =
     Buffer.from(
       audioBase64,
@@ -451,6 +463,7 @@ const generateTTS = async (
     );
 
   if (!pcm.length) {
+
     const error: any =
       new Error(
         "Gemini TTS returned empty audio."
@@ -461,27 +474,18 @@ const generateTTS = async (
     throw error;
   }
 
-  console.log(
-    "Gemini TTS audio received:",
-    {
-      voice,
-      geminiVoice,
-      pcmBytes: pcm.length,
-      sampleRate: 24000,
-      channels: 1,
-      bitsPerSample: 16,
-    }
-  );
-
-  /* ----------------------------------------------------------
-     PCM -> WAV
-     ---------------------------------------------------------- */
+  /*
+   * Gemini TTS audio:
+   * 24 kHz
+   * mono
+   * 16-bit PCM
+   */
 
   return pcmToWav(
     pcm,
     24000
   );
-};
+}
 
 /* ============================================================
    HTTP HANDLER
@@ -491,15 +495,14 @@ export default async function handler(
   req: VercelRequest,
   res: VercelResponse
 ) {
-  /* ----------------------------------------------------------
-     METHOD
-     ---------------------------------------------------------- */
 
-  if (req.method !== "GET") {
-    res.setHeader(
-      "Allow",
-      "GET"
-    );
+  /* ========================================================
+     METHOD
+     ======================================================== */
+
+  if (
+    req.method !== "GET"
+  ) {
 
     return res
       .status(405)
@@ -509,9 +512,9 @@ export default async function handler(
       });
   }
 
-  /* ----------------------------------------------------------
+  /* ========================================================
      TEXT
-     ---------------------------------------------------------- */
+     ======================================================== */
 
   const text =
     sanitizeText(
@@ -519,6 +522,7 @@ export default async function handler(
     );
 
   if (!text) {
+
     return res
       .status(400)
       .json({
@@ -527,9 +531,9 @@ export default async function handler(
       });
   }
 
-  /* ----------------------------------------------------------
+  /* ========================================================
      VOICE
-     ---------------------------------------------------------- */
+     ======================================================== */
 
   const voice =
     normalizeVoice(
@@ -541,20 +545,21 @@ export default async function handler(
       voice
     );
 
-  /* ----------------------------------------------------------
+  /* ========================================================
      GENERATE
-     ---------------------------------------------------------- */
+     ======================================================== */
 
   try {
+
     const audio =
       await generateTTS(
         text,
         voice
       );
 
-    /* --------------------------------------------------------
+    /* ======================================================
        AUDIO RESPONSE
-       -------------------------------------------------------- */
+       ====================================================== */
 
     res.setHeader(
       "Content-Type",
@@ -577,25 +582,20 @@ export default async function handler(
     );
 
     /*
-     * Cache cùng câu + cùng giọng.
+     * Cache:
+     *
+     * Same sentence + same voice
+     * can be reused.
      */
+
     res.setHeader(
       "Cache-Control",
       "public, max-age=86400, stale-while-revalidate=3600"
     );
 
-    /*
-     * CORS an toàn cho cùng ứng dụng
-     * và các trường hợp frontend audio fetch.
-     */
-    res.setHeader(
-      "Access-Control-Allow-Origin",
-      "*"
-    );
-
-    /* --------------------------------------------------------
+    /* ======================================================
        DEBUG HEADERS
-       -------------------------------------------------------- */
+       ====================================================== */
 
     res.setHeader(
       "X-TTS-Voice",
@@ -621,72 +621,51 @@ export default async function handler(
       .status(200)
       .send(audio);
 
-  } catch (error: any) {
+  } catch (
+    error: any
+  ) {
+
     const status =
       Number(
         error?.status
       ) || 502;
 
     console.error(
-      "Production TTS error:",
+      "[TTS] Production error",
       {
         status,
-
         voice,
-
         geminiVoice,
-
         message:
           error?.message ||
           String(error),
       }
     );
 
-    /* --------------------------------------------------------
+    /* ======================================================
        QUOTA
-       -------------------------------------------------------- */
+       ====================================================== */
 
-    if (status === 429) {
+    if (
+      status === 429
+    ) {
+
       return res
         .status(429)
         .json({
           error:
             "Gemini TTS đang hết quota.",
-
           voice,
-
           geminiVoice,
-
           retryAfter:
             error?.retryAfter ||
             undefined,
         });
     }
 
-    /* --------------------------------------------------------
-       BAD REQUEST FROM GEMINI
-       -------------------------------------------------------- */
-
-    if (status === 400) {
-      return res
-        .status(502)
-        .json({
-          error:
-            "Gemini TTS từ chối yêu cầu.",
-
-          voice,
-
-          geminiVoice,
-
-          details:
-            error?.message ||
-            String(error),
-        });
-    }
-
-    /* --------------------------------------------------------
+    /* ======================================================
        GENERAL ERROR
-       -------------------------------------------------------- */
+       ====================================================== */
 
     return res
       .status(
@@ -696,6 +675,7 @@ export default async function handler(
           : 502
       )
       .json({
+
         error:
           "Không thể tạo âm thanh TTS lúc này.",
 
@@ -706,6 +686,7 @@ export default async function handler(
         details:
           error?.message ||
           String(error),
+
       });
   }
 }
